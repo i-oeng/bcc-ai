@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.pytest_cache/
+.idea/
+.vscode/
+# журналы прогонов (запросы к модели); итоговый прогон кладём в reports/
+runs/
