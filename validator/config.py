@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 # gemini-3.6-flash: стабильно доступна на бесплатном тарифе; у 3.8-flash лимит 20 запросов в сутки
 DEFAULT_MODEL = "gemini-3.6-flash"
-DEFAULT_FALLBACKS = "gemini-3.8-flash,gemini-4-hydrogen,gemma-4-31b-it"
+DEFAULT_FALLBACKS = "gemini-3.8-flash,gemini-4-hydrogen,gemini-3.5-flash-lite,gemma-4-31b-it"
 
 
 def _load_env(path: Path) -> None:
@@ -48,6 +48,7 @@ class Config:
     redact_ner: bool
     redact_terms_file: str | None
     runs_dir: str
+    cache_dir: str | None
     tz: ZoneInfo
 
     @classmethod
@@ -66,6 +67,7 @@ class Config:
             redact_ner=_bool("REDACT_NER", True),
             redact_terms_file=os.getenv("REDACT_TERMS_FILE", "").strip() or None,
             runs_dir=os.getenv("VALIDATOR_RUNS_DIR", "").strip() or str(root / "runs"),
+            cache_dir=None if not _bool("VALIDATOR_CACHE", True) else (os.getenv("VALIDATOR_CACHE_DIR", "").strip() or str(root / ".cache")),
             tz=ZoneInfo(os.getenv("VALIDATOR_TZ", "Asia/Almaty")),
         )
         for k, v in overrides.items():

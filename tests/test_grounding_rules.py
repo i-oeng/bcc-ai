@@ -33,7 +33,7 @@ def test_rules_find_template_defects():
     d = load(SAMPLE)
     hits = rules.run(d, d.text)
     kinds = {h.rule for h in hits}
-    assert {"get_mutation", "units", "placeholder", "status_undocumented", "no_version", "compound"} <= kinds
+    assert {"get_mutation", "units", "placeholder", "status_undocumented", "no_version", "compound", "empty_section"} <= kinds
 
 
 def test_docx_reader(tmp_path):
@@ -52,3 +52,12 @@ def test_docx_reader(tmp_path):
     assert d.title == "Тестовое ТЗ"
     assert any("Ф-1. Система должна" in ln for ln in d.lines)
     assert any(ln.startswith("| Порог | 1 000 |") for ln in d.lines)
+
+
+def test_pdf_table_quotes():
+    d = load(SAMPLE.with_suffix(".pdf"))
+    g = Grounder(d)
+    # в PDF ячейки идут как |cardId|string|1–64|, модель цитирует их через пробел или «|»
+    for q in ["cardId string 1–64", "cardId | string | 1–64 | Да", "Расходы 48 500 ₸, порог 50 000 ₸ Провести покупку на 1 500 ₸"]:
+        a = g.find(q)
+        assert a is not None and a.page is not None, q

@@ -31,9 +31,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--fallback", help="запасные модели через запятую (по умолчанию GEMINI_FALLBACK_MODELS)")
     ap.add_argument("--batch-size", type=int, help="сколько требований проверять за один запрос (по умолчанию 12)")
     ap.add_argument("--no-redact", action="store_true", help="не маскировать чувствительные данные (не рекомендуется)")
+    ap.add_argument("--no-cache", action="store_true", help="не брать ответы модели из кэша (полностью новый прогон)")
     ap.add_argument("--dry-run", action="store_true",
                     help="ничего не отправлять в модель: только показать, что ушло бы (маскированный документ и первый запрос)")
     ap.add_argument("--list-models", action="store_true", help="показать модели, доступные вашему ключу")
+    ap.add_argument("--rerender", metavar="RUN_DIR",
+                    help="перерисовать отчёт из сохранённого прогона runs/<...> без запросов к модели")
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = ap.parse_args(argv)
 
@@ -47,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         redact=False if args.no_redact else None,
     )
+    if args.no_cache:
+        cfg.cache_dir = None
 
     if args.list_models:
         from .llm import GeminiClient
@@ -58,6 +63,14 @@ def main(argv: list[str] | None = None) -> int:
         except LLMError as e:
             print(f"Ошибка: {e}", file=sys.stderr)
             return 2
+        return 0
+
+    if args.rerender:
+        from . import pipeline, report
+
+        res = pipeline.load_state(args.rerender)
+        out = args.input or args.output or args.out_opt or str(Path("reports") / f"{res.doc.path.stem}_report.md")
+        print(f"Отчёт: {report.write(res, out)}")
         return 0
 
     if not args.input:

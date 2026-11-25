@@ -33,7 +33,8 @@ _TRANS = str.maketrans(
         "…": ".",
     }
 )
-_DROP = set("*`_#>|")
+_DROP = set("*`_#>")
+_SPACE = set("|")
 
 
 @dataclass
@@ -78,7 +79,7 @@ class Grounder:
         for i, ch in enumerate(s):
             if ch in _DROP:
                 continue
-            ch = ch.translate(_TRANS).lower()
+            ch = " " if ch in _SPACE else ch.translate(_TRANS).lower()
             if ch.isspace():
                 if prev_space:
                     continue
@@ -103,6 +104,11 @@ class Grounder:
     def _anchor(self, nstart: int, nend: int, score: float) -> Anchor:
         start = self.idx[nstart]
         end = self.idx[max(nstart, nend - 1)] + 1
+        # нечёткое совпадение может начаться или закончиться посреди слова: расширяем до границ слов
+        while start > 0 and self.src[start - 1].isalnum():
+            start -= 1
+        while end < len(self.src) and self.src[end].isalnum():
+            end += 1
         l1, l2 = self._line_of(start), self._line_of(end - 1)
         return Anchor(
             text=self.src[start:end].strip(),
@@ -113,7 +119,7 @@ class Grounder:
             score=score,
         )
 
-    def find(self, quote: str, min_score: float = 88.0) -> Anchor | None:
+    def find(self, quote: str, min_score: float = 88.0, _split: bool = True) -> Anchor | None:
         if not quote or not quote.strip():
             return None
         q, _ = self._normalize(quote.strip().strip('"').strip("«»"))
@@ -128,7 +134,7 @@ class Grounder:
             parts = [x for x in re.split(r"\.\.\.|…", quote) if len(x.strip()) >= 8]
             best = None
             for part in sorted(parts, key=len, reverse=True):
-                a = self.find(part, min_score)
+                a = self.find(part, min_score, _split=False)
                 if a and (best is None or a.score > best.score):
                     best = a
             if best:
@@ -136,9 +142,21 @@ class Grounder:
         if len(q) < 12:
             return None
         al = fuzz.partial_ratio_alignment(q, self.norm, score_cutoff=min_score)
-        if al is None:
+        if al is not None:
+            return self._anchor(al.dest_start, al.dest_end, al.score)
+        if not _split:
             return None
-        return self._anchor(al.dest_start, al.dest_end, al.score)
+        # модель могла склеить цитату из соседних мест (строка статуса + пример ответа):
+        # берём первый по порядку кусок размером с предложение, который есть в документе
+        pieces = [p for p in re.split(r"(?<=[.;!?])\s+|\s*[{}]\s*", quote) if len(p.split()) >= 3 and len(p.strip()) >= 15]
+        if not pieces or (len(pieces) == 1 and pieces[0].strip() == quote.strip()):
+            return None
+        for piece in pieces:
+            a = self.find(piece, min_score, _split=False)
+            if a:
+                a.score = min(a.score, 90.0)  # частичная опора
+                return a
+        return None
 
     def line_anchor(self, line: int) -> Anchor:
         """Опора на целую строку (для правил, которые работают построчно)."""

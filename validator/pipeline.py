@@ -24,12 +24,14 @@ from . import __version__, prompts, rules
 from .config import Config
 from .criteria import ALL, REQUIREMENT_CRITERIA, SET_CRITERIA, SEVERITIES
 from .grounding import Anchor, Grounder
-from .llm import GeminiClient
+from .llm import GeminiClient, LLMError
 from .loader import Document, load
 from .redact import Redactor
 from .schemas import (
     Clarification,
     Conclusion,
+    Dedup,
+    Final,
     Finding,
     Requirement,
     RequirementBatch,
@@ -39,6 +41,7 @@ from .schemas import (
 )
 
 SEV_ORDER = {"critical": 0, "major": 1, "minor": 2}
+DEDUPE_THRESHOLD = 45
 
 
 @dataclass
@@ -60,7 +63,8 @@ class RunResult:
     decision_dev: str = ""
     decision_test: str = ""
     redactor: Redactor | None = None
-    client: GeminiClient | None = None
+    usage: object = None  # llm.Usage
+    warnings: list[str] = field(default_factory=list)
     audit_dir: Path | None = None
 
     def kept(self) -> list[Finding]:
@@ -117,10 +121,13 @@ def run(input_path: str, cfg: Config, log=print, dry_run: bool = False, client_f
         return res
 
     if client_factory is None:
-        client = GeminiClient(cfg.api_key, cfg.model, redactor, audit, cfg.temperature, log=log, fallbacks=cfg.fallbacks)
+        client = GeminiClient(
+            cfg.api_key, cfg.model, redactor, audit, cfg.temperature, log=log, fallbacks=cfg.fallbacks,
+            cache_dir=Path(cfg.cache_dir) if cfg.cache_dir else None,
+        )
     else:
         client = client_factory(redactor, audit)
-    res.client = client
+    res.usage = client.usage
 
     # 2. нарезка
     t = _step(log, "Нарезка документа на требования")
@@ -209,7 +216,8 @@ def run(input_path: str, cfg: Config, log=print, dry_run: bool = False, client_f
 
     # 7. верификация
     t = _step(log, f"Верификация {len(res.findings)} находок")
-    ver = client.generate("verify", prompts.SYSTEM, prompts.verification(numbered, _findings_block(res.findings)), Verification)
+    by_line = sorted(res.findings, key=lambda f: (f.anchors[0].line, f.fid))
+    ver = client.generate("verify", prompts.SYSTEM, prompts.verification(numbered, _findings_block(by_line)), Verification)
     by_id = {f.fid: f for f in res.findings}
     for it in ver.items:
         f = by_id.get(it.finding_id.strip())
@@ -223,31 +231,75 @@ def run(input_path: str, cfg: Config, log=print, dry_run: bool = False, client_f
             f.duplicate_of = dup
         f.verifier_note = it.reason
     _fix_duplicate_chains(res)
-    kept = res.kept()
-    _done(log, t, f"подтверждено {len(kept)}, отклонено {sum(1 for f in res.findings if not f.kept)}, "
+    _done(log, t, f"подтверждено {len(res.kept())}, отклонено {sum(1 for f in res.findings if not f.kept)}, "
           f"дублей {sum(1 for f in res.findings if f.kept and f.duplicate_of)}")
+
+    # 7б. отдельный проход по дублям, только если находок много (экономим квоту)
+    if len(res.kept()) > DEDUPE_THRESHOLD:
+        t = _step(log, f"Объединение дублей среди {len(res.kept())} находок")
+        cand = sorted(res.kept(), key=lambda f: (f.anchors[0].line, f.fid))
+        try:
+            dd = client.generate("dedupe", prompts.SYSTEM, prompts.deduplication(_findings_block(cand, brief=True)), Dedup)
+            merged = _apply_dedup(res, dd)
+            _done(log, t, f"объединено {merged}, осталось {len(res.kept())}")
+        except LLMError as e:
+            res.warnings.append(f"Проход объединения дублей не выполнен: {e}")
+            log(f"  пропущено: {e}")
+    _merge_duplicates_into_main(res)
+    _renumber(res)
+    kept = res.kept()
     _reconcile_verdicts(res)
 
-    # 8. вопросы
-    t = _step(log, "Вопросы для уточнения")
-    important = [f for f in kept if f.severity in ("critical", "major")] or kept
-    cl = client.generate("clarify", prompts.SYSTEM, prompts.clarification(numbered, _findings_block(important)), Clarification)
-    order = {"blocking": 0, "important": 1, "nice": 2}
-    res.questions = sorted(cl.questions, key=lambda q: order.get(q.priority, 3))
-    _done(log, t, f"{len(res.questions)} вопросов")
-
-    # 9. итог
-    t = _step(log, "Итог")
+    # 8. вопросы для уточнения и итог (один запрос); решение о готовности принимает код
+    t = _step(log, "Вопросы для уточнения и итог")
     _decide(res)
-    stats_txt = _stats_text(res)
+    important = [f for f in kept if f.severity in ("critical", "major")] or kept
     decision = f"Разработка: {res.decision_dev}\nТестирование: {res.decision_test}"
-    res.conclusion = client.generate(
-        "conclusion", prompts.SYSTEM, prompts.conclusion(stats_txt, decision, _findings_block(important)), Conclusion
-    )
-    _done(log, t, "")
+    try:
+        fin = client.generate(
+            "final", prompts.SYSTEM, prompts.final(numbered, _stats_text(res), decision, _findings_block(important)), Final
+        )
+        order = {"blocking": 0, "important": 1, "nice": 2}
+        res.questions = sorted(fin.questions, key=lambda q: order.get(q.priority, 3))
+        res.conclusion = Conclusion(
+            development_rationale=fin.development_rationale, testing_rationale=fin.testing_rationale,
+            fix_first=fin.fix_first, overall=fin.overall,
+        )
+        _done(log, t, f"{len(res.questions)} вопросов")
+    except LLMError as e:
+        res.warnings.append(f"Вопросы и итог от модели не получены, итог составлен правилом: {e}")
+        res.conclusion = _fallback_conclusion(res)
+        log(f"  модель недоступна, итог составлен правилом: {e}")
     res.finished = datetime.now(cfg.tz)
     save_json(res, audit / "result.json")
+    save_state(res, audit / "state.pkl")
     return res
+
+
+def save_state(res: RunResult, path: Path) -> None:
+    """Полное состояние прогона, чтобы перерисовать отчёт без запросов к модели (--rerender).
+
+    Внутри таблица маскирования с исходными значениями, поэтому файл остаётся только
+    в локальной папке runs/ (она в .gitignore), как и сам исходный документ.
+    """
+    import pickle
+
+    ner = res.redactor._ner if res.redactor else None
+    if res.redactor:
+        res.redactor._ner = None  # модель Natasha не сериализуется и не нужна для отчёта
+    try:
+        with open(path, "wb") as fh:
+            pickle.dump(res, fh)
+    finally:
+        if res.redactor:
+            res.redactor._ner = ner
+
+
+def load_state(run_dir: str | Path) -> RunResult:
+    import pickle
+
+    with open(Path(run_dir) / "state.pkl", "rb") as fh:
+        return pickle.load(fh)
 
 
 def save_json(res: RunResult, path: Path) -> None:
@@ -260,8 +312,8 @@ def save_json(res: RunResult, path: Path) -> None:
     data = {
         "document": {"path": str(res.doc.path), "title": res.doc.title, "sha256": res.doc.sha256},
         "model": res.config.model,
-        "model_versions": sorted(res.client.usage.model_versions) if res.client else [],
-        "steps": list(res.client.usage.steps) if res.client else [],
+        "model_versions": sorted(res.usage.model_versions) if res.usage else [],
+        "steps": list(res.usage.steps) if res.usage else [],
         "agent_version": res.agent_version,
         "started": res.started.isoformat(),
         "requirements": [
@@ -269,7 +321,7 @@ def save_json(res: RunResult, path: Path) -> None:
             for r in res.requirements
         ],
         "findings": [
-            {"fid": f.fid, "scope": f.scope, "criterion": f.criterion, "severity": f.severity, "req_ids": f.req_ids,
+            {"fid": f.fid, "orig_id": f.orig_id, "scope": f.scope, "criterion": f.criterion, "severity": f.severity, "req_ids": f.req_ids,
              "source": f.source, "kept": f.kept, "duplicate_of": f.duplicate_of, "problem": f.problem, "fix": f.fix,
              "verifier_note": f.verifier_note, "anchors": [anchor(a) for a in f.anchors]}
             for f in res.findings
@@ -277,6 +329,7 @@ def save_json(res: RunResult, path: Path) -> None:
         "ungrounded": [{"criterion": f.criterion, "problem": f.problem, "quotes": f.dropped_quotes} for f in res.ungrounded],
         "questions": [q.model_dump() for q in res.questions],
         "decision": {"development": res.decision_dev, "testing": res.decision_test},
+        "warnings": res.warnings,
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
 
@@ -359,6 +412,9 @@ def _number_findings(res: RunResult) -> None:
 def _fix_duplicate_chains(res: RunResult) -> None:
     by_id = {f.fid: f for f in res.findings}
     for f in res.findings:
+        if f.duplicate_of and not by_id[f.duplicate_of].kept:
+            f.duplicate_of = ""  # основная находка отклонена: дубль становится самостоятельной
+    for f in res.findings:
         seen = {f.fid}
         target = f.duplicate_of
         while target and by_id[target].duplicate_of and target not in seen:
@@ -376,6 +432,70 @@ def _fix_duplicate_chains(res: RunResult) -> None:
             for r in f.req_ids:
                 if r not in main.req_ids:
                     main.req_ids.append(r)
+
+
+def _apply_dedup(res: RunResult, dd) -> int:
+    by_id = {f.fid: f for f in res.findings}
+    merged = 0
+    for g in dd.groups:
+        main = by_id.get(g.keep.strip())
+        if not main or not main.kept or main.duplicate_of:
+            continue
+        for d in g.duplicates:
+            f = by_id.get(d.strip())
+            if not f or f is main or not f.kept or f.duplicate_of:
+                continue
+            f.duplicate_of = main.fid
+            f.verifier_note = (f.verifier_note + " " if f.verifier_note else "") + f"Дубль: {g.reason}"
+            merged += 1
+    _fix_duplicate_chains(res)
+    return merged
+
+
+def _merge_duplicates_into_main(res: RunResult) -> None:
+    """Основная находка получает места и требования своих дублей."""
+    by_id = {f.fid: f for f in res.findings}
+    for f in res.findings:
+        if not (f.kept and f.duplicate_of):
+            continue
+        main = by_id[f.duplicate_of]
+        if SEV_ORDER[f.severity] < SEV_ORDER[main.severity]:
+            main.severity = f.severity
+        for r in f.req_ids:
+            if r not in main.req_ids:
+                main.req_ids.append(r)
+        for a in f.anchors:
+            if len(main.anchors) >= 4:
+                break
+            if all(a.line != b.line for b in main.anchors):
+                main.anchors.append(a)
+        main.anchors.sort(key=lambda a: a.line)
+    rank = {r.rid: i for i, r in enumerate(res.requirements)}
+    for f in res.findings:
+        f.req_ids.sort(key=lambda r: rank.get(r, 999))
+
+
+def _renumber(res: RunResult) -> None:
+    """Подтверждённые находки получают сплошные номера; затем дубли и отклонённые."""
+    rank = {r.rid: i for i, r in enumerate(res.requirements)}
+
+    def key(f: Finding):
+        first = min((rank.get(r, 999) for r in f.req_ids), default=999)
+        return (0 if f.scope == "requirement" else 1, first, SEV_ORDER[f.severity], f.anchors[0].line)
+
+    main = sorted([f for f in res.findings if f.kept and not f.duplicate_of], key=key)
+    dups = sorted([f for f in res.findings if f.kept and f.duplicate_of], key=key)
+    rej = sorted([f for f in res.findings if not f.kept], key=key)
+    mapping = {}
+    for i, f in enumerate(main + dups + rej, 1):
+        mapping[f.fid] = f"Н-{i:02d}"
+    for f in res.findings:
+        f.orig_id = f.fid
+        f.fid = mapping[f.fid]
+    for f in res.findings:
+        if f.duplicate_of:
+            f.duplicate_of = mapping[f.duplicate_of]
+    res.findings = main + dups + rej
 
 
 def _reconcile_verdicts(res: RunResult) -> None:
@@ -434,6 +554,18 @@ def _decide(res: RunResult) -> None:
         res.decision_test = "МОЖНО"
 
 
+def _fallback_conclusion(res: RunResult) -> Conclusion:
+    from .schemas import FixItem
+
+    top = sorted(res.kept(), key=lambda f: (SEV_ORDER[f.severity], f.fid))[:7]
+    return Conclusion(
+        development_rationale=f"{res.decision_dev}.",
+        testing_rationale=f"{res.decision_test}.",
+        fix_first=[FixItem(title=ALL[f.criterion].name, finding_ids=[f.fid], action=f.fix) for f in top],
+        overall=_stats_text(res),
+    )
+
+
 def _stats_text(res: RunResult) -> str:
     kept = res.kept()
     by_sev = {s: sum(1 for f in kept if f.severity == s) for s in SEVERITIES}
@@ -449,9 +581,13 @@ def _req_table(res: RunResult) -> str:
     )
 
 
-def _findings_block(findings: list[Finding]) -> str:
+def _findings_block(findings: list[Finding], brief: bool = False) -> str:
     out = []
     for f in findings:
+        if brief:
+            lines = ", ".join(str(a.line) for a in f.anchors)
+            out.append(f"{f.fid} [{f.criterion}, {f.severity}, строки {lines}, {', '.join(f.req_ids) or 'документ'}]: {f.problem}")
+            continue
         quotes = "; ".join(f"«{a.text}» (строка {a.line})" for a in f.anchors)
         out.append(
             f"{f.fid} [{f.source}] критерий={f.criterion} ({ALL[f.criterion].name}) серьёзность={f.severity} "

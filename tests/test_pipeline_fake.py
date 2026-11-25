@@ -8,6 +8,8 @@ from validator.llm import Usage
 from validator.schemas import (
     Clarification,
     Conclusion,
+    Dedup,
+    Final,
     RequirementBatch,
     Segmentation,
     SetReview,
@@ -59,6 +61,19 @@ class FakeClient:
                 items[-1]["keep"] = False
                 items[-1]["reason"] = "домысел"
             return Verification.model_validate({"items": items})
+        if schema is Dedup:
+            a = next((ln.split()[0] for ln in prompt.splitlines() if "Ф-2 относит" in ln), None)
+            b = next((ln.split()[0] for ln in prompt.splitlines() if "То же противоречие" in ln), None)
+            groups = [{"keep": a, "duplicates": [b], "reason": "одно противоречие"}] if a and b else []
+            return Dedup.model_validate({"groups": groups})
+        if schema is Final:
+            return Final.model_validate({
+                "questions": [{"priority": "blocking", "addressee": "Бизнес-заказчик", "req_ids": ["ТР-02"], "finding_ids": ["Н-01"],
+                               "quote": "Месяц определяется по дате совершения покупки в Алматы", "question": "Какой месяц?",
+                               "why": "Иначе тест не написать", "options": ["по дате совершения", "по дате проведения"]}],
+                "development_rationale": "Есть противоречие Н-01.", "testing_rationale": "Нельзя.",
+                "fix_first": [{"title": "Месяц", "finding_ids": ["Н-01"], "action": "Выбрать правило"}],
+                "overall": "Документ сырой."})
         if schema is Clarification:
             return Clarification.model_validate({"questions": [
                 {"priority": "blocking", "addressee": "Бизнес-заказчик", "req_ids": ["ТР-02"], "finding_ids": ["Н-01"],
@@ -71,7 +86,8 @@ class FakeClient:
         raise AssertionError(schema)
 
 
-def test_end_to_end(tmp_path):
+def test_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "DEDUPE_THRESHOLD", 1)
     cfg = Config.load(runs_dir=str(tmp_path / "runs"), redact_ner=False)
     res = pipeline.run(str(SAMPLE), cfg, log=lambda *_: None, client_factory=lambda red, audit: FakeClient(red))
     assert [r.doc_id for r in res.requirements] == ["Ф-1", "Ф-2", "A. Критерий приёмки 2"]
@@ -79,9 +95,34 @@ def test_end_to_end(tmp_path):
     assert len(res.ungrounded) == 1  # находка без опоры на текст отброшена
     assert any(f.source == "rule" for f in res.findings)
     assert res.decision_dev.startswith("НЕЛЬЗЯ")
+    # дубль объединён с основной находкой, номера подтверждённых сплошные
+    main = next(f for f in res.findings if "Ф-2 относит" in f.problem)
+    dup = next(f for f in res.findings if "То же противоречие" in f.problem and f.duplicate_of)
+    assert dup.duplicate_of == main.fid and "ТР-03" in main.req_ids
+    kept_ids = [f.fid for f in res.kept()]
+    assert kept_ids == [f"Н-{i:02d}" for i in range(1, len(kept_ids) + 1)]
     out = report.write(res, tmp_path / "report.md")
     text = out.read_text(encoding="utf-8")
     for section in ["## 1. Паспорт прогона", "## 2. Как агент нарезал требования", "## 3. Проверка каждого требования",
                     "## 4. Проверка всего набора требований", "## 5. Вопросы для уточнения", "## 6. Сводка", "## 7. Итог"]:
         assert section in text
     assert "строка" in text and "ТР-02" in text
+    # состояние сохраняется, и отчёт перерисовывается без модели
+    again = pipeline.load_state(res.audit_dir)
+    assert report.Renderer(again).render() == text
+
+
+def test_final_step_failure_still_writes_report(tmp_path):
+    from validator.llm import LLMError
+
+    class Failing(FakeClient):
+        def generate(self, name, system, prompt, schema):
+            if schema is Final:
+                raise LLMError("503 перегрузка")
+            return super().generate(name, system, prompt, schema)
+
+    cfg = Config.load(runs_dir=str(tmp_path / "runs"), redact_ner=False)
+    res = pipeline.run(str(SAMPLE), cfg, log=lambda *_: None, client_factory=lambda red, audit: Failing(red))
+    assert res.warnings and res.conclusion and res.conclusion.fix_first
+    text = report.write(res, tmp_path / "r.md").read_text(encoding="utf-8")
+    assert "Предупреждение" in text and "## 7. Итог" in text

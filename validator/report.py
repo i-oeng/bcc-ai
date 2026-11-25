@@ -47,12 +47,19 @@ class Renderer:
 
     # ---- форматирование ----
 
-    def t(self, s: str) -> str:
-        """Текст модели: вернуть замаскированные значения на место."""
-        return self.R(s or "").strip()
+    def t(self, s: str, model: bool = True) -> str:
+        """Вернуть замаскированные значения на место.
 
-    def cell(self, s: str, limit: int | None = None) -> str:
-        s = self.t(s).replace("\n", " ")
+        model=True: текст, написанный моделью; длинные тире заменяются двоеточием
+        (стиль отчёта). Цитаты документа (model=False) не меняются ни на символ.
+        """
+        s = self.R(s or "").strip()
+        if model:
+            s = re.sub(r"\s+[—–]\s+", ": ", s)
+        return s
+
+    def cell(self, s: str, limit: int | None = None, model: bool = True) -> str:
+        s = self.t(s, model).replace("\n", " ")
         s = re.sub(r"\*\*|`", "", s)
         s = s.replace("|", "\\|")
         if limit and len(s) > limit:
@@ -60,7 +67,7 @@ class Renderer:
         return s
 
     def quote(self, a: Anchor, limit: int = 220) -> str:
-        q = self.cell(a.text, limit)
+        q = self.cell(a.text, limit, model=False)
         return f"«{q}» ({a.where()})"
 
     def fid_link(self, fid: str) -> str:
@@ -86,14 +93,14 @@ class Renderer:
         r = self.res
         return (
             f"# Отчёт о проверке требований\n\n"
-            f"**Документ:** {self.cell(r.doc.title)}  \n"
+            f"**Документ:** {self.cell(r.doc.title, model=False)}  \n"
             f"**Итог:** разработка: {r.decision_dev.lower()}; тестирование: {r.decision_test.lower()}.\n\n"
             "Отчёт сформирован агентом автоматически. Каждое нарушение ссылается на строку проверяемого документа."
         )
 
     def passport(self) -> str:
         r = self.res
-        u = r.client.usage if r.client else None
+        u = r.usage
         model = f"Google Gemini `{r.config.model}`"
         if u and u.steps:
             used = Counter(m for _, m in u.steps)
@@ -112,7 +119,7 @@ class Renderer:
             secs = int((r.finished - r.started).total_seconds())
             dur = f"{secs // 60} мин {secs % 60} с"
         rows = [
-            ("Название документа", self.cell(r.doc.title)),
+            ("Название документа", self.cell(r.doc.title, model=False)),
             ("Файл", f"`{r.doc.path.name}` ({r.doc.fmt.upper()}, {len(r.doc.lines)} строк)"),
             ("SHA-256 файла", f"`{r.doc.sha256[:16]}…`"),
             ("Дата прогона", r.started.strftime("%d.%m.%Y %H:%M") + f" ({r.config.tz.key})"),
@@ -124,8 +131,12 @@ class Renderer:
         if u:
             rows.append(("Запросов к модели", f"{u.calls}; токенов: вход {u.prompt_tokens}, выход {u.output_tokens}"
                          + (f", рассуждение {u.thinking_tokens}" if u.thinking_tokens else "")))
+        if u and getattr(u, "cached", 0):
+            rows.append(("Кэш ответов", f"шагов взято из кэша: {u.cached} (прогон продолжен после сбоя или повторён)"))
         if dur:
             rows.append(("Длительность", dur))
+        for w in getattr(r, "warnings", []) or []:
+            rows.append(("Предупреждение", self.cell(w, 300)))
         if r.audit_dir:
             rows.append(("Журнал запросов", f"`{_rel(r.audit_dir)}`"))
         body = "\n".join(f"| {k} | {v} |" for k, v in rows)
@@ -148,7 +159,7 @@ class Renderer:
         for q in r.requirements:
             lines.append(
                 f"| {q.rid} | {self.cell(q.doc_id)} | {self.cell(q.anchor.where())} | {self.cell(q.summary)} | "
-                f"«{self.cell(q.quote, 160)}» |"
+                f"«{self.cell(q.quote, 160, model=False)}» |"
             )
         if r.skipped:
             lines += ["", "**Не отнесено к требованиям:**", ""]
@@ -198,7 +209,7 @@ class Renderer:
             own = [f for f in kept if f.scope == "requirement" and q.rid in f.req_ids]
             related = [f for f in kept if f.scope == "set" and q.rid in f.req_ids]
             out += ["", f'<a id="{q.rid.lower()}"></a>', f"#### {q.rid} · {self.cell(q.doc_id)} · {self.cell(q.summary)}", "",
-                    f"> {self.cell(q.quote, 400)}  ", f"> *{q.anchor.where()}*", ""]
+                    f"> {self.cell(q.quote, 400, model=False)}  ", f"> *{q.anchor.where()}*", ""]
             if not own:
                 out.append("Нарушений на уровне отдельного требования не подтверждено.")
             for f in own:
@@ -273,7 +284,8 @@ class Renderer:
             "## 6. Сводка",
             "",
             f"* Требований выделено: **{len(r.requirements)}**.",
-            f"* Требований с нарушениями: **{len({x for f in kept for x in f.req_ids})}** из {len(r.requirements)}.",
+            f"* Требований с нарушениями на уровне отдельного требования: "
+            f"**{len({x for f in kept if f.scope == 'requirement' for x in f.req_ids})}** из {len(r.requirements)}.",
             f"* Подтверждённых нарушений: **{len(kept)}** (🔴 критичных {by_sev['critical']}, 🟠 существенных "
             f"{by_sev['major']}, 🟡 незначительных {by_sev['minor']}).",
             f"* Отклонено верификатором: {len(rejected)}; объединено дублей: {len(dups)}; "

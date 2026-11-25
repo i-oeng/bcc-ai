@@ -68,7 +68,7 @@ def run(doc: Document, text: str) -> list[RuleHit]:
     hits: list[RuleHit] = []
     hits += _vague(lines)
     hits += _placeholders(lines)
-    hits += _empty_table_rows(lines, doc)
+    hits += _empty_sections(lines, doc)
     hits += _singular_and_modal(lines)
     hits += _units(lines)
     hits += _http(lines, doc)
@@ -129,16 +129,55 @@ def _placeholders(lines: list[str]) -> list[RuleHit]:
     return out
 
 
-def _empty_table_rows(lines: list[str], doc: Document) -> list[RuleHit]:
+_HEAD = re.compile(r"^(#{1,6})\s+(.*\S)")
+_SEP = re.compile(r"^\|?\s*:?-{3,}")
+
+
+def _empty_sections(lines: list[str], doc: Document) -> list[RuleHit]:
+    """Раздел без данных: только шапка таблицы, пустые строки таблицы или жирные подписи.
+
+    В Markdown пустая таблица видна как строки «| | |»; в PDF она схлопывается
+    в одну строку с заголовками столбцов. Оба случая ловятся одинаково.
+    """
+    heads = [(i, len(m.group(1)), m.group(2).replace("*", "").strip())
+             for i, ln in enumerate(lines, 1) if (m := _HEAD.match(ln))]
     out = []
-    for i, ln in enumerate(lines, 1):
-        if ln.startswith("|") and re.fullmatch(r"\|(\s*\|)+\s*", ln):
-            sec = doc.line_sections[i - 1] if i - 1 < len(doc.line_sections) else ""
+    for k, (i, level, title) in enumerate(heads):
+        nxt = heads[k + 1] if k + 1 < len(heads) else None
+        if nxt and nxt[1] > level and nxt[0] - i <= 2:
+            continue  # родительский раздел, содержимое в подразделах
+        stop = nxt[0] if nxt else len(lines) + 1
+        body = [(j, lines[j - 1].strip()) for j in range(i + 1, stop)
+                if lines[j - 1].strip() and not re.fullmatch(r"[-*_]{3,}", lines[j - 1].strip())]
+        if not body or any(t.startswith("```") for _, t in body):
+            continue
+        has_frame = False
+        has_data = False
+        table_row = 0
+        for _, t in body:
+            if t.startswith("|"):
+                table_row += 1
+                if _SEP.match(t):
+                    continue
+                cells = [c.strip() for c in t.strip("|").split("|")]
+                if table_row == 1 or all(not c or c.startswith("**") and c.endswith("**") for c in cells):
+                    has_frame = True  # шапка таблицы
+                elif any(cells):
+                    has_data = True
+                else:
+                    has_frame = True  # пустая строка таблицы
+            elif re.fullmatch(r"\*\*[^*]+\*\*", t):
+                has_frame = True  # только жирная подпись (шапка таблицы в PDF)
+                table_row = 0
+            else:
+                has_data = True
+                table_row = 0
+        if has_frame and not has_data:
             out.append(
                 RuleHit(
-                    "empty_row", "set_modifiable", "major", [i],
-                    f"Пустая строка таблицы в разделе «{sec}»: ответственные/значения не указаны.",
-                    "Заполнить таблицу (ФИО, подразделение, подпись/дата) до утверждения документа.",
+                    "empty_section", "set_complete", "major", [body[0][0]],
+                    f"Раздел «{title}» не заполнен: есть только заголовки таблицы, данных нет.",
+                    "Заполнить раздел (для блока согласования: подразделение, ФИО, подпись, дата) или указать, почему он не нужен.",
                     whole_doc=True,
                 )
             )

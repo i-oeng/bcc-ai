@@ -85,6 +85,16 @@ class Verification(BaseModel):
     items: list[VerifiedItem]
 
 
+class DuplicateGroup(BaseModel):
+    keep: str = Field(description="ID основной находки группы")
+    duplicates: list[str] = Field(description="ID находок, которые описывают тот же дефект")
+    reason: str
+
+
+class Dedup(BaseModel):
+    groups: list[DuplicateGroup]
+
+
 class Question(BaseModel):
     priority: str = Field(description="blocking | important | nice")
     addressee: str = Field(description="Кому задать вопрос: Бизнес-заказчик | Аналитик | Архитектор | Разработка процессинга | ИБ | Тестирование | Юристы/комплаенс")
@@ -104,6 +114,14 @@ class FixItem(BaseModel):
     title: str
     finding_ids: list[str]
     action: str
+
+
+class Final(BaseModel):
+    questions: list[Question]
+    development_rationale: str
+    testing_rationale: str
+    fix_first: list[FixItem]
+    overall: str = Field(description="2-4 предложения: общий вывод о документе")
 
 
 class Conclusion(BaseModel):
@@ -142,3 +160,4 @@ class Finding:
     verifier_note: str = ""
     duplicate_of: str = ""
     dropped_quotes: list[str] = field(default_factory=list)
+    orig_id: str = ""  # ID до перенумерации (как в журнале запросов)

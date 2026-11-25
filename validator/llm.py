@@ -33,6 +33,7 @@ class Usage:
     thinking_tokens: int = 0
     seconds: float = 0.0
     model_versions: set[str] = field(default_factory=set)
+    cached: int = 0
     steps: list[tuple[str, str]] = field(default_factory=list)  # шаг и модель, которая ответила
 
 
@@ -48,6 +49,7 @@ class GeminiClient:
         log=print,
         fallbacks: list[str] | None = None,
         timeout_s: int = 240,
+        cache_dir: Path | None = None,
     ):
         if not api_key:
             raise LLMError(
@@ -64,6 +66,9 @@ class GeminiClient:
         self.model = model
         self.models = list(dict.fromkeys([model] + [m for m in (fallbacks or []) if m]))
         self.overload_retries = 2
+        self.cache_dir = cache_dir
+        if cache_dir:
+            cache_dir.mkdir(parents=True, exist_ok=True)
         self.redactor = redactor
         self.audit_dir = audit_dir
         self.temperature = temperature
@@ -94,6 +99,15 @@ class GeminiClient:
             response_schema=schema,
             temperature=self.temperature,
         )
+        cached = self._cache_get(system, prompt, schema)
+        if cached is not None:
+            result, model = cached
+            self.usage.cached += 1
+            self.usage.steps.append((name, model))
+            if self.audit_dir:
+                (self.audit_dir / f"{n:02d}_{name}.response.json").write_text(result.model_dump_json(indent=1), encoding="utf-8")
+            self.log(f"    ответ взят из кэша ({model})")
+            return result
         last_err: Exception | None = None
         for mi, model in enumerate(self.models):
             overloaded = 0
@@ -141,9 +155,35 @@ class GeminiClient:
                             self.log(f"    {model}: ответ не прошёл проверку схемы, повтор")
                             continue
                         break
-                self.usage.steps.append((name, getattr(resp, "model_version", None) or model))
+                answered = getattr(resp, "model_version", None) or model
+                self.usage.steps.append((name, answered))
+                self._cache_put(system, prompt, schema, result, answered)
                 return result
         raise LLMError(f"Шаг {name}: ни одна модель не вернула корректный ответ: {last_err}")
+
+    def _cache_key(self, system: str, prompt: str, schema) -> str:
+        import hashlib
+
+        payload = json.dumps([system, prompt, schema.__name__, schema.model_json_schema()], ensure_ascii=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+    def _cache_get(self, system, prompt, schema):
+        if not self.cache_dir:
+            return None
+        p = self.cache_dir / f"{self._cache_key(system, prompt, schema)}.json"
+        if not p.exists():
+            return None
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return schema.model_validate(data["result"]), data["model"]
+        except Exception:
+            return None
+
+    def _cache_put(self, system, prompt, schema, result, model) -> None:
+        if not self.cache_dir:
+            return
+        p = self.cache_dir / f"{self._cache_key(system, prompt, schema)}.json"
+        p.write_text(json.dumps({"model": model, "result": result.model_dump()}, ensure_ascii=False), encoding="utf-8")
 
     def _account(self, resp) -> None:
         um = getattr(resp, "usage_metadata", None)
