@@ -66,6 +66,8 @@ class GeminiClient:
         self.model = model
         self.models = list(dict.fromkeys([model] + [m for m in (fallbacks or []) if m]))
         self.overload_retries = 2
+        self.rounds = 4  # кругов по цепочке при общей перегрузке
+        self.exhausted: set[str] = set()
         self.cache_dir = cache_dir
         if cache_dir:
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -109,57 +111,68 @@ class GeminiClient:
             self.log(f"    ответ взят из кэша ({model})")
             return result
         last_err: Exception | None = None
-        for mi, model in enumerate(self.models):
-            overloaded = 0
-            has_next = mi + 1 < len(self.models)
-            for attempt in range(1, self.max_retries + 1):
-                t0 = time.time()
-                try:
-                    resp = self.client.models.generate_content(model=model, contents=prompt, config=cfg)
-                except errors.APIError as e:
-                    last_err = e
-                    code = getattr(e, "code", None)
-                    msg = str(e)
-                    if code == 429 and _quota_exhausted(msg):
-                        if has_next:
-                            self.log(f"    {model}: нет квоты, переключаюсь на {self.models[mi + 1]}")
-                            break
-                        raise LLMError(_explain(e)) from e
-                    if code in (500, 502, 503, 504):
-                        overloaded += 1
-                        if has_next and overloaded >= self.overload_retries:
-                            self.log(f"    {model}: перегружена ({code}), переключаюсь на {self.models[mi + 1]}")
-                            break
-                    if code == 404 and has_next:
-                        self.log(f"    {model}: недоступна (404), переключаюсь на {self.models[mi + 1]}")
-                        break
-                    if code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
-                        delay = _retry_delay(msg, attempt)
-                        self.log(f"    {model}: ответ {code}, повтор через {delay:.0f} с (попытка {attempt}/{self.max_retries})")
-                        time.sleep(delay)
-                        continue
-                    raise LLMError(_explain(e)) from e
-                self.usage.seconds += time.time() - t0
-                self._account(resp)
-                text = resp.text or ""
-                if self.audit_dir:
-                    (self.audit_dir / f"{n:02d}_{name}.response.json").write_text(text, encoding="utf-8")
-                parsed = getattr(resp, "parsed", None)
-                result = parsed if isinstance(parsed, schema) else None
-                if result is None:
+        for rnd in range(1, self.rounds + 1):
+            live = [m for m in self.models if m not in self.exhausted]
+            if not live:
+                raise LLMError(
+                    "У всех моделей цепочки исчерпана дневная квота бесплатного тарифа "
+                    "(сброс в полночь по тихоокеанскому времени). Повторите прогон позже: "
+                    f"готовые шаги возьмутся из кэша. Последняя ошибка: {last_err}"
+                )
+            for mi, model in enumerate(live):
+                nxt = live[mi + 1] if mi + 1 < len(live) else None
+                overloaded = 0
+                for attempt in range(1, self.max_retries + 1):
+                    t0 = time.time()
                     try:
-                        result = schema.model_validate_json(_strip_fences(text))
-                    except ValidationError as e:
+                        resp = self.client.models.generate_content(model=model, contents=prompt, config=cfg)
+                    except errors.APIError as e:
                         last_err = e
-                        if attempt < self.max_retries:
-                            self.log(f"    {model}: ответ не прошёл проверку схемы, повтор")
+                        code = getattr(e, "code", None)
+                        msg = str(e)
+                        if (code == 429 and _quota_exhausted(msg)) or code == 404:
+                            self.exhausted.add(model)  # до конца прогона эту модель не трогаем
+                            why = "нет квоты" if code == 429 else "недоступна (404)"
+                            self.log(f"    {model}: {why}" + (f", переключаюсь на {nxt}" if nxt else ""))
+                            break
+                        if code in (500, 502, 503, 504):
+                            overloaded += 1
+                            if overloaded >= self.overload_retries:
+                                self.log(f"    {model}: перегружена ({code})" + (f", переключаюсь на {nxt}" if nxt else ""))
+                                break
+                        if code in (429, 500, 502, 503, 504):
+                            if attempt >= self.max_retries:
+                                break
+                            delay = _retry_delay(msg, attempt)
+                            self.log(f"    {model}: ответ {code}, повтор через {delay:.0f} с")
+                            time.sleep(delay)
                             continue
-                        break
-                answered = getattr(resp, "model_version", None) or model
-                self.usage.steps.append((name, answered))
-                self._cache_put(system, prompt, schema, result, answered)
-                return result
-        raise LLMError(f"Шаг {name}: ни одна модель не вернула корректный ответ: {last_err}")
+                        raise LLMError(_explain(e)) from e
+                    self.usage.seconds += time.time() - t0
+                    self._account(resp)
+                    text = resp.text or ""
+                    if self.audit_dir:
+                        (self.audit_dir / f"{n:02d}_{name}.response.json").write_text(text, encoding="utf-8")
+                    parsed = getattr(resp, "parsed", None)
+                    result = parsed if isinstance(parsed, schema) else None
+                    if result is None:
+                        try:
+                            result = schema.model_validate_json(_strip_fences(text))
+                        except ValidationError as e:
+                            last_err = e
+                            if attempt < self.max_retries:
+                                self.log(f"    {model}: ответ не прошёл проверку схемы, повтор")
+                                continue
+                            break
+                    answered = getattr(resp, "model_version", None) or model
+                    self.usage.steps.append((name, answered))
+                    self._cache_put(system, prompt, schema, result, answered)
+                    return result
+            if rnd < self.rounds and any(m not in self.exhausted for m in self.models):
+                wait = 30 * rnd
+                self.log(f"    все модели цепочки перегружены, пауза {wait} с (круг {rnd + 1}/{self.rounds})")
+                time.sleep(wait)
+        raise LLMError(f"Шаг {name}: ни одна модель не ответила. Повторите прогон позже, готовые шаги возьмутся из кэша. {last_err}")
 
     def _cache_key(self, system: str, prompt: str, schema) -> str:
         import hashlib
