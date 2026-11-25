@@ -117,7 +117,7 @@ def run(input_path: str, cfg: Config, log=print, dry_run: bool = False, client_f
         return res
 
     if client_factory is None:
-        client = GeminiClient(cfg.api_key, cfg.model, redactor, audit, cfg.temperature, log=log)
+        client = GeminiClient(cfg.api_key, cfg.model, redactor, audit, cfg.temperature, log=log, fallbacks=cfg.fallbacks)
     else:
         client = client_factory(redactor, audit)
     res.client = client
@@ -261,6 +261,7 @@ def save_json(res: RunResult, path: Path) -> None:
         "document": {"path": str(res.doc.path), "title": res.doc.title, "sha256": res.doc.sha256},
         "model": res.config.model,
         "model_versions": sorted(res.client.usage.model_versions) if res.client else [],
+        "steps": list(res.client.usage.steps) if res.client else [],
         "agent_version": res.agent_version,
         "started": res.started.isoformat(),
         "requirements": [

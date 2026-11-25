@@ -33,6 +33,7 @@ class Usage:
     thinking_tokens: int = 0
     seconds: float = 0.0
     model_versions: set[str] = field(default_factory=set)
+    steps: list[tuple[str, str]] = field(default_factory=list)  # шаг и модель, которая ответила
 
 
 class GeminiClient:
@@ -45,6 +46,8 @@ class GeminiClient:
         temperature: float | None = None,
         max_retries: int = 6,
         log=print,
+        fallbacks: list[str] | None = None,
+        timeout_s: int = 240,
     ):
         if not api_key:
             raise LLMError(
@@ -54,8 +57,13 @@ class GeminiClient:
         from google import genai
 
         self._genai = genai
-        self.client = genai.Client(api_key=api_key)
+        from google.genai import types
+
+        # без таймаута зависший запрос держал бы весь прогон
+        self.client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=timeout_s * 1000))
         self.model = model
+        self.models = list(dict.fromkeys([model] + [m for m in (fallbacks or []) if m]))
+        self.overload_retries = 2
         self.redactor = redactor
         self.audit_dir = audit_dir
         self.temperature = temperature
@@ -66,6 +74,11 @@ class GeminiClient:
             audit_dir.mkdir(parents=True, exist_ok=True)
 
     def generate(self, name: str, system: str, prompt: str, schema: type[T]) -> T:
+        """Один шаг конвейера. Модели пробуются по цепочке: основная, затем запасные.
+
+        503/500 (перегрузка) и исчерпанная бесплатная квота переводят шаг на следующую
+        модель; ограничение «запросов в минуту» пережидается на той же модели.
+        """
         from google.genai import errors, types
 
         self.redactor.guard(system + "\n" + prompt)
@@ -73,7 +86,7 @@ class GeminiClient:
         n = self.usage.calls
         if self.audit_dir:
             (self.audit_dir / f"{n:02d}_{name}.request.md").write_text(
-                f"<!-- model: {self.model} -->\n# SYSTEM\n\n{system}\n\n# USER\n\n{prompt}\n", encoding="utf-8"
+                f"# SYSTEM\n\n{system}\n\n# USER\n\n{prompt}\n", encoding="utf-8"
             )
         cfg = types.GenerateContentConfig(
             system_instruction=system,
@@ -82,35 +95,55 @@ class GeminiClient:
             temperature=self.temperature,
         )
         last_err: Exception | None = None
-        for attempt in range(1, self.max_retries + 1):
-            t0 = time.time()
-            try:
-                resp = self.client.models.generate_content(model=self.model, contents=prompt, config=cfg)
-            except errors.APIError as e:
-                last_err = e
-                code = getattr(e, "code", None)
-                if code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
-                    delay = _retry_delay(str(e), attempt)
-                    self.log(f"    модель ответила {code}, повтор через {delay:.0f} с (попытка {attempt}/{self.max_retries})")
-                    time.sleep(delay)
-                    continue
-                raise LLMError(_explain(e)) from e
-            self.usage.seconds += time.time() - t0
-            self._account(resp)
-            text = resp.text or ""
-            if self.audit_dir:
-                (self.audit_dir / f"{n:02d}_{name}.response.json").write_text(text, encoding="utf-8")
-            parsed = getattr(resp, "parsed", None)
-            if isinstance(parsed, schema):
-                return parsed
-            try:
-                return schema.model_validate_json(_strip_fences(text))
-            except ValidationError as e:
-                last_err = e
-                if attempt < self.max_retries:
-                    self.log(f"    ответ не прошёл проверку схемы, повтор (попытка {attempt}/{self.max_retries})")
-                    continue
-        raise LLMError(f"Шаг {name}: модель не вернула корректный ответ: {last_err}")
+        for mi, model in enumerate(self.models):
+            overloaded = 0
+            has_next = mi + 1 < len(self.models)
+            for attempt in range(1, self.max_retries + 1):
+                t0 = time.time()
+                try:
+                    resp = self.client.models.generate_content(model=model, contents=prompt, config=cfg)
+                except errors.APIError as e:
+                    last_err = e
+                    code = getattr(e, "code", None)
+                    msg = str(e)
+                    if code == 429 and _quota_exhausted(msg):
+                        if has_next:
+                            self.log(f"    {model}: нет квоты, переключаюсь на {self.models[mi + 1]}")
+                            break
+                        raise LLMError(_explain(e)) from e
+                    if code in (500, 502, 503, 504):
+                        overloaded += 1
+                        if has_next and overloaded >= self.overload_retries:
+                            self.log(f"    {model}: перегружена ({code}), переключаюсь на {self.models[mi + 1]}")
+                            break
+                    if code == 404 and has_next:
+                        self.log(f"    {model}: недоступна (404), переключаюсь на {self.models[mi + 1]}")
+                        break
+                    if code in (429, 500, 502, 503, 504) and attempt < self.max_retries:
+                        delay = _retry_delay(msg, attempt)
+                        self.log(f"    {model}: ответ {code}, повтор через {delay:.0f} с (попытка {attempt}/{self.max_retries})")
+                        time.sleep(delay)
+                        continue
+                    raise LLMError(_explain(e)) from e
+                self.usage.seconds += time.time() - t0
+                self._account(resp)
+                text = resp.text or ""
+                if self.audit_dir:
+                    (self.audit_dir / f"{n:02d}_{name}.response.json").write_text(text, encoding="utf-8")
+                parsed = getattr(resp, "parsed", None)
+                result = parsed if isinstance(parsed, schema) else None
+                if result is None:
+                    try:
+                        result = schema.model_validate_json(_strip_fences(text))
+                    except ValidationError as e:
+                        last_err = e
+                        if attempt < self.max_retries:
+                            self.log(f"    {model}: ответ не прошёл проверку схемы, повтор")
+                            continue
+                        break
+                self.usage.steps.append((name, getattr(resp, "model_version", None) or model))
+                return result
+        raise LLMError(f"Шаг {name}: ни одна модель не вернула корректный ответ: {last_err}")
 
     def _account(self, resp) -> None:
         um = getattr(resp, "usage_metadata", None)
@@ -135,6 +168,11 @@ def _strip_fences(text: str) -> str:
     text = text.strip()
     m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.S)
     return m.group(1) if m else text
+
+
+def _quota_exhausted(msg: str) -> bool:
+    """429 из-за нулевой или исчерпанной дневной квоты (а не лимита в минуту)."""
+    return bool(re.search(r"limit: 0\b|per\s*day|perday|per_day", msg, re.I))
 
 
 def _retry_delay(msg: str, attempt: int) -> float:

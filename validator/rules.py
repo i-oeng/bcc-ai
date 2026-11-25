@@ -235,10 +235,9 @@ def _status_codes(lines: list[str], doc: Document) -> list[RuleHit]:
         sec = (doc.line_sections[i - 1] if i - 1 < len(doc.line_sections) else "").lower()
         if not re.search(r"ответ|статус|response|status|код", sec + " " + ln.lower()):
             continue
-        m = re.match(r"^\s*\*\*([1-5]\d\d)\.\*\*", ln)
-        if m:
-            defined.setdefault(m.group(1), i)
-        m = re.match(r"^\s*#+\s*([1-5]\d\d)\b", ln) or re.match(r"^\s*\*\*([1-5]\d\d)\*\*\s*$", ln)
+        for c in re.findall(r"\*\*([1-5]\d\d)\.\*\*", ln):
+            defined.setdefault(c, i)
+        m = re.match(r"^\s*#+\s*\**\s*([1-5]\d\d)\b", ln) or re.match(r"^\s*\*\*([1-5]\d\d)\*\*\s*$", ln)
         if m:
             examples.setdefault(m.group(1), i)
         if not ln.lstrip().startswith("{"):

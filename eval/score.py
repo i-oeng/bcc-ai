@@ -33,7 +33,8 @@ def main() -> int:
         return 2
     result = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     gold = json.loads(Path(sys.argv[2] if len(sys.argv) > 2 else ROOT / "eval" / "gold.json").read_text(encoding="utf-8"))
-    doc = load(ROOT / gold["document"])
+    doc_path = Path(result["document"]["path"])
+    doc = load(doc_path if doc_path.is_absolute() else ROOT / doc_path)
     g = Grounder(doc)
 
     kept = [f for f in result["findings"] if f["kept"]]
@@ -62,7 +63,7 @@ def main() -> int:
     total = len(gold["defects"])
     core = [d for d in gold["defects"] if d["core"]]
     core_found = [d for d, _ in found if d["core"]]
-    print(f"Документ: {gold['document']}; прогон: {sys.argv[1]}; модель: {result.get('model')}")
+    print(f"Документ: {doc.path.name}; прогон: {sys.argv[1]}; модель: {result.get('model')}")
     print(f"Полнота: {len(found)}/{total} = {len(found) / total:.0%}; по ключевым (core): "
           f"{len(core_found)}/{len(core)} = {len(core_found) / len(core):.0%}")
     print(f"Подтверждённых находок: {len(kept)} (уникальных {sum(1 for f in kept if not f['duplicate_of'])}); "

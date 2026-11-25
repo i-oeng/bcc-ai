@@ -15,7 +15,7 @@ from . import __version__
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8")
+            stream.reconfigure(encoding="utf-8", line_buffering=True)
         except Exception:
             pass
 
@@ -28,7 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("output", nargs="?", help="путь к файлу отчёта (по умолчанию reports/<имя>_report.md)")
     ap.add_argument("-o", "--out", dest="out_opt", help="то же, что второй аргумент")
     ap.add_argument("--model", help="модель Gemini (по умолчанию из GEMINI_MODEL в .env)")
-    ap.add_argument("--batch-size", type=int, help="сколько требований проверять за один запрос (по умолчанию 8)")
+    ap.add_argument("--fallback", help="запасные модели через запятую (по умолчанию GEMINI_FALLBACK_MODELS)")
+    ap.add_argument("--batch-size", type=int, help="сколько требований проверять за один запрос (по умолчанию 12)")
     ap.add_argument("--no-redact", action="store_true", help="не маскировать чувствительные данные (не рекомендуется)")
     ap.add_argument("--dry-run", action="store_true",
                     help="ничего не отправлять в модель: только показать, что ушло бы (маскированный документ и первый запрос)")
@@ -40,7 +41,12 @@ def main(argv: list[str] | None = None) -> int:
     from .llm import LLMError
     from .redact import RedactionLeak
 
-    cfg = Config.load(model=args.model, batch_size=args.batch_size, redact=False if args.no_redact else None)
+    cfg = Config.load(
+        model=args.model,
+        fallbacks=[m.strip() for m in args.fallback.split(",") if m.strip()] if args.fallback is not None else None,
+        batch_size=args.batch_size,
+        redact=False if args.no_redact else None,
+    )
 
     if args.list_models:
         from .llm import GeminiClient

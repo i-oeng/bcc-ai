@@ -94,11 +94,12 @@ class Renderer:
     def passport(self) -> str:
         r = self.res
         u = r.client.usage if r.client else None
-        model = r.config.model
-        if u and u.model_versions:
-            vers = ", ".join(sorted(u.model_versions))
-            if vers != model:
-                model += f" (ответила версия: {vers})"
+        model = f"Google Gemini `{r.config.model}`"
+        if u and u.steps:
+            used = Counter(m for _, m in u.steps)
+            if set(used) != {r.config.model}:
+                model += "; фактически ответили: " + ", ".join(f"`{m}` (шагов: {n})" for m, n in used.most_common())
+                model += " (основная модель была перегружена, сработала запасная цепочка)"
         red = r.redactor.stats() if r.redactor else {}
         if not r.config.redact:
             red_txt = "отключено"
@@ -115,7 +116,7 @@ class Renderer:
             ("Файл", f"`{r.doc.path.name}` ({r.doc.fmt.upper()}, {len(r.doc.lines)} строк)"),
             ("SHA-256 файла", f"`{r.doc.sha256[:16]}…`"),
             ("Дата прогона", r.started.strftime("%d.%m.%Y %H:%M") + f" ({r.config.tz.key})"),
-            ("Модель", f"Google Gemini `{model}`"),
+            ("Модель", model),
             ("Версия агента", r.agent_version),
             ("Критерии", "ISO/IEC/IEEE 29148:2018 п. 5.2.5, 5.2.6; IEEE Std 830-1998 п. 4.3"),
             ("Маскирование данных", red_txt),
