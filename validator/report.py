@@ -83,6 +83,7 @@ class Renderer:
             self.per_requirement(),
             self.set_level(),
             self.questions(),
+            self.checklist(),
             self.summary(),
             self.verdict(),
             self.appendix(),
@@ -91,12 +92,41 @@ class Renderer:
 
     def header(self) -> str:
         r = self.res
-        return (
-            f"# Отчёт о проверке требований\n\n"
-            f"**Документ:** {self.cell(r.doc.title, model=False)}  \n"
-            f"**Итог:** разработка: {r.decision_dev.lower()}; тестирование: {r.decision_test.lower()}.\n\n"
-            "Отчёт сформирован агентом автоматически. Каждое нарушение ссылается на строку проверяемого документа."
-        )
+        open_ = r.open_findings()
+        sev = Counter(f.severity for f in open_)
+        closed = len(r.kept()) - len(open_)
+        blocking = [(i, q) for i, q in enumerate(r.questions, 1) if q.priority == "blocking"]
+        out = [
+            "# Отчёт о проверке требований",
+            "",
+            f"**Документ:** {self.cell(r.doc.title, model=False)}  ",
+            "Отчёт сформирован агентом автоматически. Каждое нарушение ссылается на строку проверяемого документа.",
+            "",
+            "## Кратко",
+            "",
+            f"* **Разработка:** {r.decision_dev}.",
+            f"* **Тестирование:** {r.decision_test}.",
+            f"* **Требований:** {len(r.requirements)}; **открытых нарушений:** {len(open_)} "
+            f"(🔴 {sev['critical']} · 🟠 {sev['major']} · 🟡 {sev['minor']})"
+            + (f"; закрыто ответами заказчика: {closed}" if closed else "")
+            + f"; **вопросов заказчику:** {len(r.questions)}, из них блокирующих {len(blocking)}.",
+        ]
+        crit = sorted([f for f in open_ if f.severity == "critical"], key=lambda f: f.fid)
+        if crit:
+            out += ["", "**Главные дефекты:**", ""]
+            for f in crit[:6]:
+                ids = ", ".join(self.cell(r.req(x).doc_id) for x in f.req_ids if r.req(x)) or "документ"
+                out.append(f"1. {self.fid_link(f.fid)} ({ids}): {self.cell(_first_sentence(f.problem), 220)}")
+            if len(crit) > 6:
+                out.append(f"\nЕщё критичных: {len(crit) - 6}, см. [сводку](#сводка).")
+        if blocking:
+            out += ["", "**Спросить у заказчика в первую очередь:**", ""]
+            for i, q in blocking[:5]:
+                out.append(f"* [В-{i}](#в-{i}) {self.cell(q.question, 200)}")
+        out += ["", "Разделы: [паспорт](#1-паспорт-прогона) · [нарезка](#2-как-агент-нарезал-требования) · "
+                "[требования](#3-проверка-каждого-требования) · [набор](#4-проверка-всего-набора-требований) · "
+                "[вопросы](#5-вопросы-для-уточнения) · [чек-лист](#6-чек-лист-ревью-требований) · [сводка](#сводка) · [итог](#итог)"]
+        return "\n".join(out)
 
     def passport(self) -> str:
         r = self.res
@@ -182,6 +212,10 @@ class Renderer:
         for a in f.anchors:
             out.append(f"* **Место:** {self.quote(a)}")
         out.append(f"* **Как исправить:** {self.t(f.fix)}")
+        if f.resolution == "closed":
+            out.insert(0, f"> ✅ **Закрыто ответом заказчика.** {self.t(f.resolution_note)}\n")
+        elif f.resolution == "changed":
+            out.insert(0, f"> 🔄 **Уточнено ответом заказчика.** {self.t(f.resolution_note)}\n")
         dups = [d for d in self.res.findings if d.kept and d.duplicate_of == f.fid]
         if dups:
             out.append("* **Совпадает с:** " + ", ".join(d.fid for d in dups) + " (объединены верификатором)")
@@ -204,11 +238,16 @@ class Renderer:
         )
         out = ["## 3. Проверка каждого требования", "", "### 3.1. Матрица критериев", "", head, sep, *rows, "", legend, "",
                "### 3.2. Находки по требованиям"]
+        out.append("Блоки с критичными находками раскрыты, остальные свёрнуты (нажмите, чтобы раскрыть).")
         kept = r.kept()
         for q in r.requirements:
             own = [f for f in kept if f.scope == "requirement" and q.rid in f.req_ids]
             related = [f for f in kept if f.scope == "set" and q.rid in f.req_ids]
-            out += ["", f'<a id="{q.rid.lower()}"></a>', f"#### {q.rid} · {self.cell(q.doc_id)} · {self.cell(q.summary)}", "",
+            sev = Counter(f.severity for f in own if f.resolution != "closed")
+            badge = " ".join(f"{SEV_ICON[k]}{sev[k]}" for k in ("critical", "major", "minor") if sev[k]) or "✅"
+            opened = " open" if sev["critical"] else ""
+            out += ["", f'<a id="{q.rid.lower()}"></a>', f"<details{opened}><summary><b>{q.rid} · {self.cell(q.doc_id)}</b> · "
+                    f"{self.cell(q.summary)} · {badge}</summary>", "",
                     f"> {self.cell(q.quote, 400, model=False)}  ", f"> *{q.anchor.where()}*", ""]
             if not own:
                 out.append("Нарушений на уровне отдельного требования не подтверждено.")
@@ -219,6 +258,7 @@ class Renderer:
             oks = [(c, v) for c, v in r.req_verdicts.get(q.rid, {}).items() if v[0] == "na" and v[1]]
             if oks:
                 out.append("Не применимо: " + "; ".join(f"{ALL[c].name}: {self.cell(v[1], 120)}" for c, v in oks) + ".")
+            out += ["", "</details>"]
         return "\n".join(out)
 
     def set_level(self) -> str:
@@ -232,6 +272,16 @@ class Renderer:
             if ids:
                 note += (" " if note else "") + "Находки: " + ", ".join(ids) + "."
             out.append(f"| {c.name} | {c.source} | {SET_MARK.get(v, v)} | {note} |")
+        if r.coverage:
+            out += ["", "### Покрытие функциональных требований критериями приёмки", "",
+                    "| Требование | Проверяется критериями приёмки | Непокрытые сценарии |", "| :--- | :--- | :--- |"]
+            for c in r.coverage:
+                q = r.req(c.req_id)
+                acc = ", ".join(f"{a} ({self.cell(r.req(a).doc_id)})" for a in c.acceptance_ids if r.req(a)) or "❌ нет"
+                miss = "; ".join(self.cell(m, 160) for m in c.missing_scenarios) or "нет"
+                out.append(f"| {c.req_id} ({self.cell(q.doc_id) if q else ''}) | {acc} | {miss} |")
+            uncovered = sum(1 for c in r.coverage if not c.acceptance_ids)
+            out += ["", f"Без единого критерия приёмки: {uncovered} из {len(r.coverage)} функциональных требований."]
         kept_set = [f for f in r.kept() if f.scope == "set"]
         order = [c.code for c in SET_CRITERIA] + [c.code for c in REQUIREMENT_CRITERIA]
         for code in order:
@@ -263,7 +313,7 @@ class Renderer:
                 n += 1
                 a = g.find(q.quote) if q.quote else None
                 links = [x for x in q.finding_ids if x in self.by_id]
-                out += ["", f"**В-{n}. {self.t(q.question)}**", ""]
+                out += ["", f'<a id="в-{n}"></a>**В-{n}. {self.t(q.question)}**', ""]
                 out.append(f"* **Кому:** {self.cell(q.addressee)}")
                 if a:
                     out.append(f"* **Контекст:** {self.quote(a)}")
@@ -272,22 +322,51 @@ class Renderer:
                     out.append("* **Варианты ответа:** " + "; ".join(f"({i}) {self.t(o)}" for i, o in enumerate(q.options, 1)))
                 if links:
                     out.append("* **Связанные находки:** " + ", ".join(self.fid_link(x) for x in links))
+        out += ["", "Файл с этими вопросами и полями для ответов лежит рядом с отчётом (`*_questions.md`). "
+                "После ответов заказчика повторите прогон с `--answers`: агент закроет устранённые дефекты и пересчитает итог."]
+        if r.answers:
+            out += ["", "### Учтённые ответы заказчика", ""]
+            for qa in r.answers:
+                closed = [f for f in r.kept() if f.resolution and qa.qid in f.resolution_note]
+                eff = ", ".join(f"{self.fid_link(f.fid)} {'закрыта' if f.resolution == 'closed' else 'уточнена'}" for f in closed)
+                out.append(f"* **{qa.qid}. {self.cell(qa.question, 200)}**  ")
+                out.append(f"  Ответ: {self.cell(qa.answer, 300, model=False)}" + (f"  \n  Влияние: {eff}." if eff else "  \n  Влияние: дефекты не закрыты."))
+        return "\n".join(out)
+
+    def checklist(self) -> str:
+        r = self.res
+        if not r.checklist:
+            return ""
+        icon = {"да": "✅ Да", "нет": "❌ Нет", "не требуется": "· Не требуется"}
+        out = ["## 6. Чек-лист ревью требований", "",
+               "В документе есть шаблонный чек-лист ревью с незаполненными отметками. Агент заполнил его за ревьюера "
+               "по результатам проверки.", "",
+               "| Пункт чек-листа | Ответ агента | Обоснование |", "| :--- | :--- | :--- |"]
+        for c in r.checklist:
+            ids = ", ".join(self.fid_link(x) for x in c.finding_ids if x in self.by_id)
+            out.append(f"| {self.cell(c.item, model=False)} | {icon.get(c.answer.strip().lower(), self.cell(c.answer))} | "
+                       f"{self.cell(c.rationale, 300)}" + (f" ({ids})" if ids else "") + " |")
+        yes = sum(1 for c in r.checklist if c.answer.strip().lower() == "да")
+        out += ["", f"Пунктов выполнено: {yes} из {len(r.checklist)}."]
         return "\n".join(out)
 
     def summary(self) -> str:
         r = self.res
-        kept = r.kept()
+        kept = r.open_findings()
+        closed_n = len(r.kept()) - len(kept)
         by_sev = Counter(f.severity for f in kept)
         rejected = [f for f in r.findings if not f.kept]
         dups = [f for f in r.findings if f.kept and f.duplicate_of]
         out = [
-            "## 6. Сводка",
+            '<a id="сводка"></a>',
+            "## 7. Сводка",
             "",
             f"* Требований выделено: **{len(r.requirements)}**.",
             f"* Требований с нарушениями на уровне отдельного требования: "
             f"**{len({x for f in kept if f.scope == 'requirement' for x in f.req_ids})}** из {len(r.requirements)}.",
-            f"* Подтверждённых нарушений: **{len(kept)}** (🔴 критичных {by_sev['critical']}, 🟠 существенных "
-            f"{by_sev['major']}, 🟡 незначительных {by_sev['minor']}).",
+            f"* Открытых подтверждённых нарушений: **{len(kept)}** (🔴 критичных {by_sev['critical']}, 🟠 существенных "
+            f"{by_sev['major']}, 🟡 незначительных {by_sev['minor']})"
+            + (f"; ещё {closed_n} закрыто ответами заказчика." if closed_n else "."),
             f"* Отклонено верификатором: {len(rejected)}; объединено дублей: {len(dups)}; "
             f"отброшено без опоры на текст: {len(r.ungrounded)}.",
             f"* Вопросов для уточнения: {len(r.questions)} (блокирующих {sum(1 for q in r.questions if q.priority == 'blocking')}).",
@@ -326,7 +405,7 @@ class Renderer:
     def verdict(self) -> str:
         r = self.res
         c = r.conclusion
-        out = ["## 7. Итог", "", f"**Можно ли начинать разработку:** {r.decision_dev}."]
+        out = ['<a id="итог"></a>', "## 8. Итог", "", f"**Можно ли начинать разработку:** {r.decision_dev}."]
         if c:
             out.append(f"{self.t(c.development_rationale)}")
         out += ["", f"**Можно ли начинать тестирование:** {r.decision_test}."]
@@ -376,6 +455,17 @@ class Renderer:
             for f in dups:
                 out.append(f"| <a id=\"{f.fid.lower()}\"></a>{f.fid} | {self.fid_link(f.duplicate_of)} | "
                            f"{self.cell(_first_sentence(f.problem), 200)} |")
+        if r.fixed:
+            out += ["", "## Приложение D. Исправленная редакция документа", "",
+                    "Агент подготовил исправленную редакцию документа (файл `*_fixed.md` рядом с отчётом). Бизнес-решения "
+                    "агент не принимает: где нужен выбор заказчика, в тексте стоит пометка [УТОЧНИТЬ: …].", "",
+                    "| Что изменено | Находки |", "| :--- | :--- |"]
+            for c in r.fixed.changes:
+                ids = ", ".join(self.fid_link(x) for x in c.finding_ids if x in self.by_id)
+                out.append(f"| {self.cell(c.change, 300)} | {ids} |")
+            if r.fixed.open_points:
+                out += ["", "**Осталось решить заказчику:**", ""]
+                out += [f"* {self.t(x)}" for x in r.fixed.open_points]
         return "\n".join(out)
 
 
@@ -390,6 +480,22 @@ def _rel(p: Path) -> str:
         return str(p.resolve().relative_to(Path.cwd().resolve())).replace("\\", "/")
     except ValueError:
         return str(p)
+
+
+def write_extras(res: RunResult, report_path: str | Path) -> dict[str, Path]:
+    """Файлы рядом с отчётом: вопросы с полями для ответов и исправленная редакция."""
+    from .clarify import write_questions
+
+    rp = Path(report_path)
+    out: dict[str, Path] = {}
+    if res.questions:
+        out["Вопросы заказчику (впишите ответы)"] = write_questions(res, rp.with_name(rp.stem + "_questions.md"))
+    if res.fixed:
+        restore = res.redactor.restore if res.redactor else (lambda x: x)
+        fp = rp.with_name(rp.stem + "_fixed.md")
+        fp.write_text(restore(res.fixed.markdown).strip() + "\n", encoding="utf-8")
+        out["Исправленная редакция документа"] = fp
+    return out
 
 
 def write(res: RunResult, out_path: str | Path) -> Path:

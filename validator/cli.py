@@ -32,6 +32,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--batch-size", type=int, help="сколько требований проверять за один запрос (по умолчанию 12)")
     ap.add_argument("--no-redact", action="store_true", help="не маскировать чувствительные данные (не рекомендуется)")
     ap.add_argument("--no-cache", action="store_true", help="не брать ответы модели из кэша (полностью новый прогон)")
+    ap.add_argument("--answers", metavar="FILE",
+                    help="файл вопросов с ответами заказчика (<отчёт>_questions.md): агент закроет дефекты, которые ответы устраняют")
+    ap.add_argument("--fix", action="store_true",
+                    help="дополнительно сформировать исправленную редакцию документа (<отчёт>_fixed.md)")
     ap.add_argument("--dry-run", action="store_true",
                     help="ничего не отправлять в модель: только показать, что ушло бы (маскированный документ и первый запрос)")
     ap.add_argument("--list-models", action="store_true", help="показать модели, доступные вашему ключу")
@@ -70,7 +74,10 @@ def main(argv: list[str] | None = None) -> int:
 
         res = pipeline.load_state(args.rerender)
         out = args.input or args.output or args.out_opt or str(Path("reports") / f"{res.doc.path.stem}_report.md")
-        print(f"Отчёт: {report.write(res, out)}")
+        path = report.write(res, out)
+        print(f"Отчёт: {path}")
+        for label, p in report.write_extras(res, path).items():
+            print(f"{label}: {p}")
         return 0
 
     if not args.input:
@@ -82,18 +89,23 @@ def main(argv: list[str] | None = None) -> int:
     from . import pipeline, report
 
     try:
-        res = pipeline.run(args.input, cfg, dry_run=args.dry_run)
+        res = pipeline.run(args.input, cfg, dry_run=args.dry_run, answers_path=args.answers, fix=args.fix)
         if args.dry_run:
             return 0
         path = report.write(res, out)
+        extra = report.write_extras(res, path)
     except (LLMError, RedactionLeak, FileNotFoundError, ValueError) as e:
         print(f"Ошибка: {e}", file=sys.stderr)
         return 1
-    kept = res.kept()
+    kept = res.open_findings()
     crit = sum(1 for f in kept if f.severity == "critical")
     print()
     print(f"Отчёт: {path}")
-    print(f"Требований: {len(res.requirements)}, нарушений: {len(kept)} (критичных {crit}), вопросов: {len(res.questions)}")
+    for label, p in extra.items():
+        print(f"{label}: {p}")
+    closed = len(res.kept()) - len(kept)
+    print(f"Требований: {len(res.requirements)}, открытых нарушений: {len(kept)} (критичных {crit})"
+          + (f", закрыто ответами: {closed}" if closed else "") + f", вопросов: {len(res.questions)}")
     print(f"Разработка: {res.decision_dev}")
     print(f"Журнал запросов к модели: {res.audit_dir}")
     return 0

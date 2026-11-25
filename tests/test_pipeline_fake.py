@@ -6,10 +6,13 @@ from validator import pipeline, report
 from validator.config import Config
 from validator.llm import Usage
 from validator.schemas import (
+    AnswerReview,
     Clarification,
+    CompletenessReview,
     Conclusion,
     Dedup,
     Final,
+    FixedDocument,
     RequirementBatch,
     Segmentation,
     SetReview,
@@ -48,8 +51,10 @@ class FakeClient:
                               {"criterion": "verifiable", "severity": "major", "quotes": ["цитата, которой нет в документе вообще"],
                                "problem": "выдумка", "fix": "-"}]},
             ]})
-        if schema is SetReview:
-            return SetReview.model_validate({"verdicts": [{"criterion": "set_consistent", "verdict": "violation", "comment": "есть противоречия"}],
+        if schema in (SetReview, CompletenessReview):
+            return schema.model_validate({"coverage": [{"req_id": "ТР-02", "acceptance_ids": ["ТР-03"], "missing_scenarios": ["возврат"]},
+                                                       {"req_id": "ТР-01", "acceptance_ids": [], "missing_scenarios": ["граница 1 000"]}],
+                                          "verdicts": [{"criterion": "set_consistent", "verdict": "violation", "comment": "есть противоречия"}],
                                              "findings": [{"criterion": "set_consistent", "severity": "critical", "req_ids": ["ТР-02", "ТР-03"],
                                                            "quotes": ["Покупка 31 января в 23:58 на 4 000 ₸"], "problem": "То же противоречие месяца.", "fix": "Исправить."}]})
         if schema is Verification:
@@ -73,7 +78,24 @@ class FakeClient:
                                "why": "Иначе тест не написать", "options": ["по дате совершения", "по дате проведения"]}],
                 "development_rationale": "Есть противоречие Н-01.", "testing_rationale": "Нельзя.",
                 "fix_first": [{"title": "Месяц", "finding_ids": ["Н-01"], "action": "Выбрать правило"}],
+                "checklist": [{"item": "Требование может быть протестировано", "answer": "Нет",
+                               "rationale": "Противоречие месяца", "finding_ids": ["Н-01"]}],
                 "overall": "Документ сырой."})
+        if schema is AnswerReview:
+            fid, last = None, None
+            for ln in prompt.splitlines():
+                if ln.startswith("Н-"):
+                    last = ln.split()[0]
+                if "Ф-2 относит" in ln and fid is None:
+                    fid = last
+            assert "по дате совершения" in prompt  # ответ «1» развёрнут в текст варианта
+            return AnswerReview.model_validate({"resolutions": [
+                {"finding_id": fid, "status": "closed", "question_ids": ["В-1"], "severity": "critical",
+                 "note": "Месяц по дате совершения; исправить критерий приёмки 2"}]})
+        if schema is FixedDocument:
+            return FixedDocument.model_validate({"markdown": "# Исправлено\n\nФ-2. Система должна относить покупку к месяцу по дате совершения.",
+                                                 "changes": [{"finding_ids": ["Н-01"], "change": "Согласован месяц"}],
+                                                 "open_points": ["[УТОЧНИТЬ: текст push]"]})
         if schema is Clarification:
             return Clarification.model_validate({"questions": [
                 {"priority": "blocking", "addressee": "Бизнес-заказчик", "req_ids": ["ТР-02"], "finding_ids": ["Н-01"],
@@ -104,8 +126,10 @@ def test_end_to_end(tmp_path, monkeypatch):
     out = report.write(res, tmp_path / "report.md")
     text = out.read_text(encoding="utf-8")
     for section in ["## 1. Паспорт прогона", "## 2. Как агент нарезал требования", "## 3. Проверка каждого требования",
-                    "## 4. Проверка всего набора требований", "## 5. Вопросы для уточнения", "## 6. Сводка", "## 7. Итог"]:
-        assert section in text
+                    "## 4. Проверка всего набора требований", "## 5. Вопросы для уточнения", "## 6. Чек-лист ревью требований",
+                    "## 7. Сводка", "## 8. Итог", "## Кратко", "Покрытие функциональных требований"]:
+        assert section in text, section
+    assert "❌ нет" in text  # Ф-1 без критериев приёмки
     assert "строка" in text and "ТР-02" in text
     # состояние сохраняется, и отчёт перерисовывается без модели
     again = pipeline.load_state(res.audit_dir)
@@ -125,4 +149,27 @@ def test_final_step_failure_still_writes_report(tmp_path):
     res = pipeline.run(str(SAMPLE), cfg, log=lambda *_: None, client_factory=lambda red, audit: Failing(red))
     assert res.warnings and res.conclusion and res.conclusion.fix_first
     text = report.write(res, tmp_path / "r.md").read_text(encoding="utf-8")
-    assert "Предупреждение" in text and "## 7. Итог" in text
+    assert "Предупреждение" in text and "## 8. Итог" in text
+
+
+def test_answers_loop_and_fixed_document(tmp_path, monkeypatch):
+    """Прогон, файл вопросов, ответ заказчика, повторный прогон: дефект закрыт, итог пересчитан."""
+    monkeypatch.setattr(pipeline, "DEDUPE_THRESHOLD", 1)
+    cfg = Config.load(runs_dir=str(tmp_path / "runs"), redact_ner=False)
+    first = pipeline.run(str(SAMPLE), cfg, log=lambda *_: None, client_factory=lambda red, audit: FakeClient(red))
+    rp = report.write(first, tmp_path / "report.md")
+    qfile = report.write_extras(first, rp)["Вопросы заказчику (впишите ответы)"]
+    text = qfile.read_text(encoding="utf-8")
+    assert "## В-1. Какой месяц?" in text and "Ответ: " in text
+    qfile.write_text(text.replace("Ответ: ", "Ответ: 1", 1), encoding="utf-8")
+
+    second = pipeline.run(str(SAMPLE), cfg, log=lambda *_: None, client_factory=lambda red, audit: FakeClient(red),
+                          answers_path=str(qfile), fix=True)
+    assert second.answers and second.answers[0].answer.startswith("Вариант 1: по дате совершения")
+    closed = [f for f in second.kept() if f.resolution == "closed"]
+    assert len(closed) == 1 and closed[0] not in second.open_findings()
+    out = report.write(second, tmp_path / "report2.md")
+    extras = report.write_extras(second, out)
+    body = out.read_text(encoding="utf-8")
+    assert "Закрыто ответом заказчика" in body and "Учтённые ответы заказчика" in body and "Приложение D" in body
+    assert extras["Исправленная редакция документа"].read_text(encoding="utf-8").startswith("# Исправлено")

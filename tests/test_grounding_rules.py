@@ -61,3 +61,15 @@ def test_pdf_table_quotes():
     for q in ["cardId string 1–64", "cardId | string | 1–64 | Да", "Расходы 48 500 ₸, порог 50 000 ₸ Провести покупку на 1 500 ₸"]:
         a = g.find(q)
         assert a is not None and a.page is not None, q
+
+
+def test_scanned_pdf_is_rejected(tmp_path):
+    import pymupdf
+    import pytest
+
+    p = tmp_path / "scan.pdf"
+    doc = pymupdf.open()
+    doc.new_page()  # страница без текстового слоя, как у скана
+    doc.save(p)
+    with pytest.raises(ValueError, match="скан"):
+        load(p)

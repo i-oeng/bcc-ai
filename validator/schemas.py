@@ -73,6 +73,18 @@ class SetReview(BaseModel):
     findings: list[SetFinding]
 
 
+class CoverageRow(BaseModel):
+    req_id: str = Field(description="ТР-xx функционального требования")
+    acceptance_ids: list[str] = Field(description="ТР-xx критериев приёмки, которые его проверяют; пусто, если таких нет")
+    missing_scenarios: list[str] = Field(description="Сценарии этого требования, которые не покрыты ни одним критерием приёмки")
+
+
+class CompletenessReview(BaseModel):
+    verdicts: list[SetVerdict]
+    findings: list[SetFinding]
+    coverage: list[CoverageRow] = Field(description="Покрытие каждого функционального требования критериями приёмки")
+
+
 class VerifiedItem(BaseModel):
     finding_id: str
     keep: bool
@@ -116,12 +128,43 @@ class FixItem(BaseModel):
     action: str
 
 
+class ChecklistAnswer(BaseModel):
+    item: str = Field(description="Пункт чек-листа дословно")
+    answer: str = Field(description="Да | Нет | Не требуется")
+    rationale: str = Field(description="Обоснование одним-двумя предложениями со ссылкой на находки или текст")
+    finding_ids: list[str]
+
+
 class Final(BaseModel):
     questions: list[Question]
+    checklist: list[ChecklistAnswer] = Field(description="Ответы на пункты чек-листа ревью из документа; пусто, если чек-листа нет")
     development_rationale: str
     testing_rationale: str
     fix_first: list[FixItem]
     overall: str = Field(description="2-4 предложения: общий вывод о документе")
+
+
+class Resolution(BaseModel):
+    finding_id: str
+    status: str = Field(description="closed (ответ устраняет дефект) | open (не устраняет) | changed (дефект остаётся, но меняется суть или серьёзность)")
+    question_ids: list[str] = Field(description="В-n, ответы на которые повлияли")
+    severity: str = Field(description="Серьёзность после ответа: critical | major | minor")
+    note: str = Field(description="Что решил ответ и что осталось сделать в документе")
+
+
+class AnswerReview(BaseModel):
+    resolutions: list[Resolution]
+
+
+class DocChange(BaseModel):
+    finding_ids: list[str]
+    change: str = Field(description="Что изменено в документе")
+
+
+class FixedDocument(BaseModel):
+    markdown: str = Field(description="Полный исправленный документ в Markdown")
+    changes: list[DocChange]
+    open_points: list[str] = Field(description="Что не удалось исправить без решения заказчика (помечено [УТОЧНИТЬ: ...])")
 
 
 class Conclusion(BaseModel):
@@ -161,3 +204,5 @@ class Finding:
     duplicate_of: str = ""
     dropped_quotes: list[str] = field(default_factory=list)
     orig_id: str = ""  # ID до перенумерации (как в журнале запросов)
+    resolution: str = ""  # closed | changed (после ответов на вопросы)
+    resolution_note: str = ""

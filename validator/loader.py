@@ -44,6 +44,12 @@ def load(path: str | Path) -> Document:
     pages: list[int | None] | None = None
     if ext == ".pdf":
         text, pages = _read_pdf(p)
+        n_pages = max(1, max((x for x in pages if x), default=1))
+        if len(re.sub(r"\s", "", text)) < 40 * n_pages:
+            raise ValueError(
+                f"В PDF почти нет текстового слоя ({n_pages} стр.): похоже на скан. Распознайте текст (OCR) "
+                "или передайте документ в DOCX/MD."
+            )
     elif ext == ".docx":
         text = _read_docx(p)
     elif ext in {".html", ".htm"}:
@@ -114,7 +120,8 @@ def _read_pdf(p: Path) -> tuple[str, list[int | None]]:
     out_pages: list[int | None] = []
     blank = False
     for ln, pg in zip(text_parts, pages):
-        ln = ln.replace(" ", " ").rstrip()
+        # переносы строк внутри ячеек таблиц PyMuPDF4LLM отдаёт как <br>
+        ln = ln.replace(" ", " ").replace("-<br>", "-").replace("<br>", " ").rstrip()
         if not ln:
             if blank:
                 continue

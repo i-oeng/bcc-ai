@@ -309,6 +309,17 @@ def _status_codes(lines: list[str], doc: Document) -> list[RuleHit]:
     return out
 
 
+def checklist_items(lines: list[str]) -> list[str]:
+    """Пункты чек-листа ревью: строки таблицы, где варианты ответа «Да / Нет» не выбраны."""
+    items = []
+    for ln in lines:
+        if ln.lstrip().startswith("|") and re.search(r"Да\s*/\s*Нет", ln):
+            first = ln.strip().strip("|").split("|")[0].replace("*", "").strip()
+            if first and not re.fullmatch(r"Да\s*/\s*Нет.*", first) and first not in items:
+                items.append(first)
+    return items
+
+
 def _doc_level(lines: list[str]) -> list[RuleHit]:
     text = "\n".join(lines)
     out = []

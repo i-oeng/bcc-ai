@@ -30,8 +30,11 @@ from .redact import Redactor
 from .schemas import (
     Clarification,
     Conclusion,
+    AnswerReview,
+    CompletenessReview,
     Dedup,
     Final,
+    FixedDocument,
     Finding,
     Requirement,
     RequirementBatch,
@@ -65,10 +68,19 @@ class RunResult:
     redactor: Redactor | None = None
     usage: object = None  # llm.Usage
     warnings: list[str] = field(default_factory=list)
+    coverage: list = field(default_factory=list)  # CoverageRow
+    checklist_items: list[str] = field(default_factory=list)
+    checklist: list = field(default_factory=list)  # ChecklistAnswer
+    answers: list = field(default_factory=list)  # clarify.QA
+    fixed: FixedDocument | None = None
     audit_dir: Path | None = None
 
     def kept(self) -> list[Finding]:
         return [f for f in self.findings if f.kept and not f.duplicate_of]
+
+    def open_findings(self) -> list[Finding]:
+        """Подтверждённые и не закрытые ответами заказчика."""
+        return [f for f in self.kept() if f.resolution != "closed"]
 
     def req(self, rid: str) -> Requirement | None:
         return next((r for r in self.requirements if r.rid == rid), None)
@@ -88,7 +100,15 @@ def agent_version() -> str:
     return __version__
 
 
-def run(input_path: str, cfg: Config, log=print, dry_run: bool = False, client_factory=None) -> RunResult:
+def run(
+    input_path: str,
+    cfg: Config,
+    log=print,
+    dry_run: bool = False,
+    client_factory=None,
+    answers_path: str | None = None,
+    fix: bool = False,
+) -> RunResult:
     """client_factory(redactor, audit_dir): свой клиент модели (для тестов); по умолчанию GeminiClient."""
     started = datetime.now(cfg.tz)
     doc = load(input_path)
@@ -188,9 +208,17 @@ def run(input_path: str, cfg: Config, log=print, dry_run: bool = False, client_f
     # 5. проверка набора
     known = "\n".join(f"- {f.problem}" for f in raw if f.source == "rule") or "(нет)"
     table = _req_table(res)
-    for name, builder in (("set_consistency", prompts.set_consistency), ("set_completeness", prompts.set_completeness)):
+    for name, builder, schema in (
+        ("set_consistency", prompts.set_consistency, SetReview),
+        ("set_completeness", prompts.set_completeness, CompletenessReview),
+    ):
         t = _step(log, "Проверка набора: " + ("противоречия" if name == "set_consistency" else "полнота и свойства набора"))
-        out = client.generate(name, prompts.SYSTEM, builder(numbered, table, known), SetReview)
+        out = client.generate(name, prompts.SYSTEM, builder(numbered, table, known), schema)
+        if isinstance(out, CompletenessReview):
+            res.coverage = [c for c in out.coverage if res.req(_norm_rid(c.req_id))]
+            for c in res.coverage:
+                c.req_id = _norm_rid(c.req_id)
+                c.acceptance_ids = [a for a in (_norm_rid(x) for x in c.acceptance_ids) if res.req(a)]
         for v in out.verdicts:
             if v.criterion in ALL:
                 res.set_verdicts[v.criterion] = (v.verdict.strip().lower(), v.comment)
@@ -250,17 +278,44 @@ def run(input_path: str, cfg: Config, log=print, dry_run: bool = False, client_f
     kept = res.kept()
     _reconcile_verdicts(res)
 
-    # 8. вопросы для уточнения и итог (один запрос); решение о готовности принимает код
+    # 7в. ответы заказчика на вопросы прошлого прогона
+    answers_txt = "(ответов пока нет)"
+    if answers_path:
+        from .clarify import parse_answers, qa_block
+
+        res.answers = parse_answers(answers_path)
+        log(f"Ответы заказчика: {len(res.answers)} из файла {answers_path}")
+        if res.answers:
+            # ответы пишет человек: они тоже проходят маскирование перед отправкой
+            answers_txt = redactor.redact(qa_block(res.answers))
+            t = _step(log, "Учёт ответов заказчика")
+            try:
+                ar = client.generate(
+                    "answers", prompts.SYSTEM, prompts.answer_review(numbered, answers_txt, _findings_block(kept)), AnswerReview
+                )
+                n_closed = _apply_resolutions(res, ar)
+                _done(log, t, f"закрыто находок: {n_closed}")
+            except LLMError as e:
+                res.warnings.append(f"Ответы заказчика не учтены: {e}")
+                log(f"  пропущено: {e}")
+
+    # 8. вопросы, итог и чек-лист ревью (один запрос); решение о готовности принимает код
     t = _step(log, "Вопросы для уточнения и итог")
     _decide(res)
-    important = [f for f in kept if f.severity in ("critical", "major")] or kept
+    res.checklist_items = rules.checklist_items(masked.split("\n"))
+    open_ = res.open_findings()
+    important = [f for f in open_ if f.severity in ("critical", "major")] or open_
     decision = f"Разработка: {res.decision_dev}\nТестирование: {res.decision_test}"
+    checklist_txt = "\n".join(f"- {x}" for x in res.checklist_items) or "(чек-листа в документе нет)"
     try:
         fin = client.generate(
-            "final", prompts.SYSTEM, prompts.final(numbered, _stats_text(res), decision, _findings_block(important)), Final
+            "final", prompts.SYSTEM,
+            prompts.final(numbered, _stats_text(res), decision, _findings_block(important), checklist_txt, answers_txt),
+            Final,
         )
         order = {"blocking": 0, "important": 1, "nice": 2}
         res.questions = sorted(fin.questions, key=lambda q: order.get(q.priority, 3))
+        res.checklist = fin.checklist if res.checklist_items else []
         res.conclusion = Conclusion(
             development_rationale=fin.development_rationale, testing_rationale=fin.testing_rationale,
             fix_first=fin.fix_first, overall=fin.overall,
@@ -270,6 +325,18 @@ def run(input_path: str, cfg: Config, log=print, dry_run: bool = False, client_f
         res.warnings.append(f"Вопросы и итог от модели не получены, итог составлен правилом: {e}")
         res.conclusion = _fallback_conclusion(res)
         log(f"  модель недоступна, итог составлен правилом: {e}")
+    # 9. исправленная редакция документа (по запросу)
+    if fix:
+        t = _step(log, "Исправленная редакция документа")
+        try:
+            res.fixed = client.generate(
+                "fix", prompts.SYSTEM, prompts.fix_document(numbered, _findings_block(open_), answers_txt), FixedDocument
+            )
+            _done(log, t, f"изменений: {len(res.fixed.changes)}, открытых вопросов: {len(res.fixed.open_points)}")
+        except LLMError as e:
+            res.warnings.append(f"Исправленная редакция не сформирована: {e}")
+            log(f"  пропущено: {e}")
+
     res.finished = datetime.now(cfg.tz)
     save_json(res, audit / "result.json")
     save_state(res, audit / "state.pkl")
@@ -323,13 +390,17 @@ def save_json(res: RunResult, path: Path) -> None:
         "findings": [
             {"fid": f.fid, "orig_id": f.orig_id, "scope": f.scope, "criterion": f.criterion, "severity": f.severity, "req_ids": f.req_ids,
              "source": f.source, "kept": f.kept, "duplicate_of": f.duplicate_of, "problem": f.problem, "fix": f.fix,
-             "verifier_note": f.verifier_note, "anchors": [anchor(a) for a in f.anchors]}
+             "verifier_note": f.verifier_note, "resolution": f.resolution, "resolution_note": f.resolution_note,
+             "anchors": [anchor(a) for a in f.anchors]}
             for f in res.findings
         ],
         "ungrounded": [{"criterion": f.criterion, "problem": f.problem, "quotes": f.dropped_quotes} for f in res.ungrounded],
         "questions": [q.model_dump() for q in res.questions],
         "decision": {"development": res.decision_dev, "testing": res.decision_test},
         "warnings": res.warnings,
+        "coverage": [c.model_dump() for c in res.coverage],
+        "checklist": [c.model_dump() for c in res.checklist],
+        "answers": [{"qid": q.qid, "question": q.question, "answer": q.answer} for q in res.answers],
     }
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
 
@@ -434,6 +505,23 @@ def _fix_duplicate_chains(res: RunResult) -> None:
                     main.req_ids.append(r)
 
 
+def _apply_resolutions(res: RunResult, ar) -> int:
+    by_id = {f.fid: f for f in res.kept()}
+    closed = 0
+    for r in ar.resolutions:
+        f = by_id.get(r.finding_id.strip())
+        st = r.status.strip().lower()
+        if not f or st not in ("closed", "changed"):
+            continue
+        f.resolution = st
+        qs = ", ".join(q for q in r.question_ids if q)
+        f.resolution_note = (f"{qs}: " if qs else "") + r.note.strip()
+        if st == "changed" and r.severity in SEVERITIES:
+            f.severity = r.severity
+        closed += st == "closed"
+    return closed
+
+
 def _apply_dedup(res: RunResult, dd) -> int:
     by_id = {f.fid: f for f in res.findings}
     merged = 0
@@ -536,7 +624,7 @@ def _reconcile_verdicts(res: RunResult) -> None:
 
 
 def _decide(res: RunResult) -> None:
-    kept = res.kept()
+    kept = res.open_findings()
     crit = [f for f in kept if f.severity == "critical"]
     major = [f for f in kept if f.severity == "major"]
     test_blockers = [f for f in crit if f.criterion in ("verifiable", "correct", "set_consistent", "unambiguous", "complete")]
@@ -567,11 +655,13 @@ def _fallback_conclusion(res: RunResult) -> Conclusion:
 
 
 def _stats_text(res: RunResult) -> str:
-    kept = res.kept()
+    kept = res.open_findings()
     by_sev = {s: sum(1 for f in kept if f.severity == s) for s in SEVERITIES}
+    closed = len(res.kept()) - len(kept)
     return (
-        f"Требований: {len(res.requirements)}. Подтверждённых нарушений: {len(kept)} "
-        f"(критичных {by_sev['critical']}, существенных {by_sev['major']}, незначительных {by_sev['minor']})."
+        f"Требований: {len(res.requirements)}. Открытых подтверждённых нарушений: {len(kept)} "
+        f"(критичных {by_sev['critical']}, существенных {by_sev['major']}, незначительных {by_sev['minor']})"
+        + (f"; закрыто ответами заказчика: {closed}." if closed else ".")
     )
 
 
