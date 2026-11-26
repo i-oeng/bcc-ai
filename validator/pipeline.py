@@ -3,8 +3,9 @@
   1. Чтение документа и маскирование чувствительных данных.
   2. LLM: нарезка на требования; цитаты привязываются к строкам документа.
   3. Правила: детерминированные проверки.
-  4. LLM: проверка каждого требования по 9 критериям (пакетами).
+  4. LLM: проверка каждого требования по критериям выбранных стандартов (пакетами).
   5. LLM: проверка набора: противоречия; полнота и прочие свойства набора.
+     Шаги 4 и 5 независимы и идут параллельно, как и итог с исправленной редакцией.
   6. Привязка цитат всех находок; находки без опоры на текст отбрасываются.
   7. LLM: независимая верификация, калибровка серьёзности, удаление дублей.
   8. LLM: вопросы для уточнения.
@@ -16,15 +17,16 @@ from __future__ import annotations
 
 import subprocess
 import time
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from . import __version__, prompts, rules
 from .config import Config
-from .criteria import ALL, REQUIREMENT_CRITERIA, SET_CRITERIA, SEVERITIES
+from .criteria import DEFAULT, SEVERITIES, Profile, profile as make_profile
 from .grounding import Anchor, Grounder
-from .llm import GeminiClient, LLMError
+from .llm import Cancelled, LLMError, make_client
 from .loader import Document, load
 from .redact import Redactor
 from .schemas import (
@@ -74,6 +76,11 @@ class RunResult:
     answers: list = field(default_factory=list)  # clarify.QA
     fixed: FixedDocument | None = None
     audit_dir: Path | None = None
+    profile: Profile | None = None  # стандарты проверки и их критерии
+
+    @property
+    def prof(self) -> Profile:
+        return getattr(self, "profile", None) or DEFAULT  # у сохранённых старых проверок профиля нет
 
     def kept(self) -> list[Finding]:
         return [f for f in self.findings if f.kept and not f.duplicate_of]
@@ -108,12 +115,20 @@ def run(
     client_factory=None,
     answers_path: str | None = None,
     fix: bool = False,
+    should_stop=None,
 ) -> RunResult:
-    """client_factory(redactor, audit_dir): свой клиент модели (для тестов); по умолчанию GeminiClient."""
+    """client_factory(redactor, audit_dir): свой клиент модели (для тестов); по умолчанию по cfg.provider.
+
+    should_stop(): True, если пользователь остановил проверку; тогда поднимается llm.Cancelled.
+    """
     started = datetime.now(cfg.tz)
+    stop = should_stop or (lambda: False)
+    prof = make_profile(cfg.standards)
     doc = load(input_path)
-    res = RunResult(doc=doc, config=cfg, started=started, agent_version=agent_version())
+    res = RunResult(doc=doc, config=cfg, started=started, agent_version=agent_version(), profile=prof)
     log(f"Документ: {doc.path.name} ({doc.fmt}, {len(doc.lines)} строк), «{doc.title}»")
+    log(f"Стандарты: {prof.titles()}")
+    SYSTEM = prompts.system(prof)
 
     # 1. маскирование
     redactor = Redactor.from_env(cfg.redact, cfg.redact_ner, cfg.redact_terms_file)
@@ -129,33 +144,35 @@ def run(
 
     stamp = started.strftime("%Y%m%d-%H%M%S")
     audit, n = Path(cfg.runs_dir) / stamp, 1
-    while audit.exists():  # два прогона в одну секунду (повтор из интерфейса) не должны затирать друг друга
+    while audit.exists():  # две проверки в одну секунду не должны затирать друг друга
         n += 1
         audit = Path(cfg.runs_dir) / f"{stamp}-{n}"
-    audit.mkdir(parents=True)
+    try:
+        audit.mkdir(parents=True)
+    except FileExistsError:  # параллельная проверка заняла то же имя
+        audit = Path(cfg.runs_dir) / f"{stamp}-{time.time_ns() % 100000}"
+        audit.mkdir(parents=True)
     res.audit_dir = audit
     (audit / "masked_input.md").write_text(masked, encoding="utf-8")
 
     if dry_run:
-        redactor.guard(prompts.SYSTEM + prompts.segmentation(numbered))
+        redactor.guard(SYSTEM + prompts.segmentation(numbered))
         (audit / "01_segment.request.md").write_text(
-            f"# SYSTEM\n\n{prompts.SYSTEM}\n\n# USER\n\n{prompts.segmentation(numbered)}", encoding="utf-8"
+            f"# SYSTEM\n\n{SYSTEM}\n\n# USER\n\n{prompts.segmentation(numbered)}", encoding="utf-8"
         )
-        log(f"Сухой прогон: в модель ничего не отправлено. Что ушло бы: {audit}")
+        log(f"Сухая проверка: в модель ничего не отправлено. Что ушло бы: {audit}")
         return res
 
     if client_factory is None:
-        client = GeminiClient(
-            cfg.api_key, cfg.model, redactor, audit, cfg.temperature, log=log, fallbacks=cfg.fallbacks,
-            cache_dir=Path(cfg.cache_dir) if cfg.cache_dir else None,
-        )
+        client = make_client(cfg, redactor, audit, log=log, should_stop=stop)
     else:
         client = client_factory(redactor, audit)
     res.usage = client.usage
+    log(f"Модель: {cfg.provider}, {cfg.model}" + (f" (запасные: {', '.join(cfg.fallbacks)})" if cfg.fallbacks else ""))
 
     # 2. нарезка
-    t = _step(log, "Нарезка документа на требования")
-    seg = client.generate("segment", prompts.SYSTEM, prompts.segmentation(numbered), Segmentation)
+    t = _step(log, "Нарезка документа на требования", stop)
+    seg = client.generate("segment", SYSTEM, prompts.segmentation(numbered), Segmentation)
     for r in seg.requirements:
         a = grounder.find(r.quote, min_score=85)
         if not a:
@@ -176,61 +193,68 @@ def run(
         raise RuntimeError("Модель не выделила ни одного требования с цитатой из документа")
 
     # 3. правила
-    t = _step(log, "Детерминированные проверки")
+    t = _step(log, "Детерминированные проверки", stop)
     raw: list[Finding] = []
     for h in rules.run(doc, masked):
+        if not prof.has(h.criterion):
+            continue  # критерий из стандарта, который не выбран (например, ранжирование из IEEE 830)
         anchors = [grounder.line_anchor(ln) for ln in h.lines]
         req_ids = [] if h.whole_doc else _reqs_for_lines(res, h.lines)
-        scope = "requirement" if (req_ids and not ALL[h.criterion].code.startswith("set_")) else "set"
+        scope = "requirement" if (req_ids and not h.criterion.startswith("set_")) else "set"
         raw.append(Finding("", scope, h.criterion, h.severity, req_ids, anchors, h.problem, h.fix, "rule"))
     _done(log, t, f"{len(raw)} находок")
 
-    # 4. проверка каждого требования
-    bs = cfg.batch_size
+    # 4-5. проверка требований пакетами и два прохода по набору: шаги независимы, идут параллельно
+    bs = max(1, cfg.batch_size)
     batches = [res.requirements[i : i + bs] for i in range(0, len(res.requirements), bs)]
+    known = "\n".join(f"- {f.problem}" for f in raw if f.source == "rule") or "(нет)"
+    table = _req_table(res)
+    tasks: list[tuple[str, object]] = []
     for bi, batch in enumerate(batches, 1):
-        t = _step(log, f"Проверка требований, пакет {bi}/{len(batches)} ({batch[0].rid}…{batch[-1].rid})")
         payload = [
             {"rid": r.rid, "doc_id": r.doc_id, "section": r.anchor.section or r.section,
              "lines": f"{r.anchor.line}-{r.anchor.line_end}", "quote": r.quote}
             for r in batch
         ]
-        out = client.generate(f"review_{bi}", prompts.SYSTEM, prompts.requirement_review(numbered, payload), RequirementBatch)
-        n = 0
-        for rv in out.reviews:
+        tasks.append((f"review_{bi}", lambda p=payload, bi=bi: client.generate(
+            f"review_{bi}", SYSTEM, prompts.requirement_review(numbered, p, prof), RequirementBatch)))
+    tasks.append(("set_consistency", lambda: client.generate(
+        "set_consistency", SYSTEM, prompts.set_consistency(numbered, table, known), SetReview)))
+    tasks.append(("set_completeness", lambda: client.generate(
+        "set_completeness", SYSTEM, prompts.set_completeness(numbered, table, known, prof), CompletenessReview)))
+    t = _step(log, f"Проверка требований ({len(batches)} пакетов) и набора (2 прохода), параллельно", stop)
+    outs = _parallel(tasks, cfg.parallel, stop)
+
+    n_req = 0
+    for bi in range(1, len(batches) + 1):
+        for rv in outs[f"review_{bi}"].reviews:
             rid = _norm_rid(rv.req_id)
             if not res.req(rid):
                 continue
             res.req_verdicts[rid] = {
-                v.criterion: (v.verdict.strip().lower(), v.comment) for v in rv.verdicts if v.criterion in ALL
+                v.criterion: (v.verdict.strip().lower(), v.comment) for v in rv.verdicts if prof.has(v.criterion)
             }
             for f in rv.findings:
-                raw.append(_finding_from_llm("requirement", f.criterion, f.severity, [rid], f.quotes, f.problem, f.fix, grounder))
-                n += 1
-        _done(log, t, f"{n} находок")
-
-    # 5. проверка набора
-    known = "\n".join(f"- {f.problem}" for f in raw if f.source == "rule") or "(нет)"
-    table = _req_table(res)
-    for name, builder, schema in (
-        ("set_consistency", prompts.set_consistency, SetReview),
-        ("set_completeness", prompts.set_completeness, CompletenessReview),
-    ):
-        t = _step(log, "Проверка набора: " + ("противоречия" if name == "set_consistency" else "полнота и свойства набора"))
-        out = client.generate(name, prompts.SYSTEM, builder(numbered, table, known), schema)
+                raw.append(_finding_from_llm("requirement", f.criterion, f.severity, [rid], f.quotes, f.problem, f.fix,
+                                             grounder, prof))
+                n_req += 1
+    n_set = 0
+    for name in ("set_consistency", "set_completeness"):
+        out = outs[name]
         if isinstance(out, CompletenessReview):
             res.coverage = [c for c in out.coverage if res.req(_norm_rid(c.req_id))]
             for c in res.coverage:
                 c.req_id = _norm_rid(c.req_id)
                 c.acceptance_ids = [a for a in (_norm_rid(x) for x in c.acceptance_ids) if res.req(a)]
         for v in out.verdicts:
-            if v.criterion in ALL:
+            if prof.has(v.criterion):
                 res.set_verdicts[v.criterion] = (v.verdict.strip().lower(), v.comment)
         for f in out.findings:
             req_ids = [r for r in (_norm_rid(x) for x in f.req_ids) if res.req(r)]
-            crit = f.criterion if f.criterion in ALL else "set_consistent" if name == "set_consistency" else "set_complete"
-            raw.append(_finding_from_llm("set", crit, f.severity, req_ids, f.quotes, f.problem, f.fix, grounder))
-        _done(log, t, f"{len(out.findings)} находок")
+            crit = f.criterion if prof.has(f.criterion) else "set_consistent" if name == "set_consistency" else "set_complete"
+            raw.append(_finding_from_llm("set", crit, f.severity, req_ids, f.quotes, f.problem, f.fix, grounder, prof))
+            n_set += 1
+    _done(log, t, f"по требованиям {n_req} находок, по набору {n_set}")
 
     # 6. привязка к тексту
     for f in raw:
@@ -247,9 +271,9 @@ def run(
         log(f"  отброшено находок без опоры на текст документа: {len(res.ungrounded)}")
 
     # 7. верификация
-    t = _step(log, f"Верификация {len(res.findings)} находок")
+    t = _step(log, f"Верификация {len(res.findings)} находок", stop)
     by_line = sorted(res.findings, key=lambda f: (f.anchors[0].line, f.fid))
-    ver = client.generate("verify", prompts.SYSTEM, prompts.verification(numbered, _findings_block(by_line)), Verification)
+    ver = client.generate("verify", SYSTEM, prompts.verification(numbered, _findings_block(by_line)), Verification)
     by_id = {f.fid: f for f in res.findings}
     for it in ver.items:
         f = by_id.get(it.finding_id.strip())
@@ -268,10 +292,10 @@ def run(
 
     # 7б. отдельный проход по дублям, только если находок много (экономим квоту)
     if len(res.kept()) > DEDUPE_THRESHOLD:
-        t = _step(log, f"Объединение дублей среди {len(res.kept())} находок")
+        t = _step(log, f"Объединение дублей среди {len(res.kept())} находок", stop)
         cand = sorted(res.kept(), key=lambda f: (f.anchors[0].line, f.fid))
         try:
-            dd = client.generate("dedupe", prompts.SYSTEM, prompts.deduplication(_findings_block(cand, brief=True)), Dedup)
+            dd = client.generate("dedupe", SYSTEM, prompts.deduplication(_findings_block(cand, brief=True)), Dedup)
             merged = _apply_dedup(res, dd)
             _done(log, t, f"объединено {merged}, осталось {len(res.kept())}")
         except LLMError as e:
@@ -292,10 +316,10 @@ def run(
         if res.answers:
             # ответы пишет человек: они тоже проходят маскирование перед отправкой
             answers_txt = redactor.redact(qa_block(res.answers))
-            t = _step(log, "Учёт ответов заказчика")
+            t = _step(log, "Учёт ответов заказчика", stop)
             try:
                 ar = client.generate(
-                    "answers", prompts.SYSTEM, prompts.answer_review(numbered, answers_txt, _findings_block(kept)), AnswerReview
+                    "answers", SYSTEM, prompts.answer_review(numbered, answers_txt, _findings_block(kept)), AnswerReview
                 )
                 n_closed = _apply_resolutions(res, ar)
                 _done(log, t, f"закрыто находок: {n_closed}")
@@ -303,20 +327,26 @@ def run(
                 res.warnings.append(f"Ответы заказчика не учтены: {e}")
                 log(f"  пропущено: {e}")
 
-    # 8. вопросы, итог и чек-лист ревью (один запрос); решение о готовности принимает код
-    t = _step(log, "Вопросы для уточнения и итог")
+    # 8-9. вопросы, итог и чек-лист ревью; исправленная редакция (по запросу). Решение о готовности принимает код.
+    # Оба запроса зависят только от подтверждённых находок, поэтому идут параллельно.
     _decide(res)
     res.checklist_items = rules.checklist_items(masked.split("\n"))
     open_ = res.open_findings()
     important = [f for f in open_ if f.severity in ("critical", "major")] or open_
     decision = f"Разработка: {res.decision_dev}\nТестирование: {res.decision_test}"
     checklist_txt = "\n".join(f"- {x}" for x in res.checklist_items) or "(чек-листа в документе нет)"
-    try:
-        fin = client.generate(
-            "final", prompts.SYSTEM,
-            prompts.final(numbered, _stats_text(res), decision, _findings_block(important), checklist_txt, answers_txt),
-            Final,
-        )
+    tasks = [("final", lambda: client.generate(
+        "final", SYSTEM,
+        prompts.final(numbered, _stats_text(res), decision, _findings_block(important), checklist_txt, answers_txt),
+        Final,
+    ))]
+    if fix:
+        tasks.append(("fix", lambda: client.generate(
+            "fix", SYSTEM, prompts.fix_document(numbered, _findings_block(open_), answers_txt), FixedDocument)))
+    t = _step(log, "Вопросы для уточнения и итог" + (", исправленная редакция (параллельно)" if fix else ""), stop)
+    outs = _parallel(tasks, cfg.parallel, stop, tolerate=True)
+    fin = outs.get("final")
+    if isinstance(fin, Final):
         order = {"blocking": 0, "important": 1, "nice": 2}
         res.questions = sorted(fin.questions, key=lambda q: order.get(q.priority, 3))
         res.checklist = fin.checklist if res.checklist_items else []
@@ -324,22 +354,19 @@ def run(
             development_rationale=fin.development_rationale, testing_rationale=fin.testing_rationale,
             fix_first=fin.fix_first, overall=fin.overall,
         )
-        _done(log, t, f"{len(res.questions)} вопросов")
-    except LLMError as e:
-        res.warnings.append(f"Вопросы и итог от модели не получены, итог составлен правилом: {e}")
+    else:
+        res.warnings.append(f"Вопросы и итог от модели не получены, итог составлен правилом: {fin}")
         res.conclusion = _fallback_conclusion(res)
-        log(f"  модель недоступна, итог составлен правилом: {e}")
-    # 9. исправленная редакция документа (по запросу)
+        log(f"  модель недоступна, итог составлен правилом: {fin}")
     if fix:
-        t = _step(log, "Исправленная редакция документа")
-        try:
-            res.fixed = client.generate(
-                "fix", prompts.SYSTEM, prompts.fix_document(numbered, _findings_block(open_), answers_txt), FixedDocument
-            )
-            _done(log, t, f"изменений: {len(res.fixed.changes)}, открытых вопросов: {len(res.fixed.open_points)}")
-        except LLMError as e:
-            res.warnings.append(f"Исправленная редакция не сформирована: {e}")
-            log(f"  пропущено: {e}")
+        fx = outs.get("fix")
+        if isinstance(fx, FixedDocument):
+            res.fixed = fx
+        else:
+            res.warnings.append(f"Исправленная редакция не сформирована: {fx}")
+            log(f"  исправленная редакция пропущена: {fx}")
+    _done(log, t, f"{len(res.questions)} вопросов"
+          + (f"; изменений в редакции: {len(res.fixed.changes)}" if res.fixed else ""))
 
     res.finished = datetime.now(cfg.tz)
     save_json(res, audit / "result.json")
@@ -383,6 +410,9 @@ def save_json(res: RunResult, path: Path) -> None:
     data = {
         "document": {"path": str(res.doc.path), "title": res.doc.title, "sha256": res.doc.sha256},
         "model": res.config.model,
+        "provider": getattr(res.config, "provider", "gemini"),
+        "standards": res.prof.ids,
+        "seconds": round((res.finished - res.started).total_seconds()) if res.finished else None,
         "model_versions": sorted(res.usage.model_versions) if res.usage else [],
         "steps": list(res.usage.steps) if res.usage else [],
         "agent_version": res.agent_version,
@@ -418,9 +448,40 @@ def _numbered(text: str) -> str:
     return "\n".join(f"{i + 1:>{w}}| {ln}" for i, ln in enumerate(lines))
 
 
-def _step(log, title: str) -> float:
+def _step(log, title: str, stop=None) -> float:
+    if stop and stop():
+        raise Cancelled("Проверка остановлена")
     log(f"▸ {title}…")
     return time.time()
+
+
+def _parallel(tasks: list[tuple[str, object]], workers: int, stop, tolerate: bool = False) -> dict:
+    """Выполнить независимые запросы к модели одновременно.
+
+    Возвращает {имя: результат}. tolerate=False: первая ошибка прерывает шаг (остальные
+    запросы доработают в фоне, их ответы попадут в кэш). tolerate=True: вместо результата
+    кладётся текст ошибки LLMError. Остановка пользователем срабатывает сразу, не дожидаясь ответов.
+    """
+    out: dict = {}
+    pool = ThreadPoolExecutor(max_workers=max(1, min(workers, len(tasks))), thread_name_prefix="llm")
+    futures = {pool.submit(fn): name for name, fn in tasks}
+    try:
+        pending = set(futures)
+        while pending:
+            if stop():
+                raise Cancelled("Проверка остановлена")
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_EXCEPTION)
+            for fut in done:
+                name = futures[fut]
+                try:
+                    out[name] = fut.result()
+                except LLMError as e:
+                    if not tolerate:
+                        raise
+                    out[name] = str(e)
+        return out
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _done(log, t0: float, msg: str) -> None:
@@ -452,7 +513,8 @@ def _reqs_for_lines(res: RunResult, lines: list[int]) -> list[str]:
     return ids
 
 
-def _finding_from_llm(scope, criterion, severity, req_ids, quotes, problem, fix, grounder: Grounder) -> Finding:
+def _finding_from_llm(scope, criterion, severity, req_ids, quotes, problem, fix, grounder: Grounder,
+                     prof: Profile = DEFAULT) -> Finding:
     anchors: list[Anchor] = []
     dropped: list[str] = []
     for q in quotes:
@@ -465,7 +527,7 @@ def _finding_from_llm(scope, criterion, severity, req_ids, quotes, problem, fix,
     if sev not in SEVERITIES:
         sev = "major"
     crit = criterion.strip()
-    if crit not in ALL:
+    if not prof.has(crit):
         crit = "complete" if scope == "requirement" else "set_complete"
     f = Finding("", scope, crit, sev, list(req_ids), anchors, problem.strip(), fix.strip(), "llm")
     f.dropped_quotes = dropped
@@ -605,7 +667,7 @@ def _reconcile_verdicts(res: RunResult) -> None:
             viol.setdefault((rid, crit), []).append(f.duplicate_of or f.fid)
     for r in res.requirements:
         cur = res.req_verdicts.setdefault(r.rid, {})
-        for c in REQUIREMENT_CRITERIA:
+        for c in res.prof.requirement:
             v, comment = cur.get(c.code, ("ok", ""))
             ids = sorted(set(viol.get((r.rid, c.code), [])))
             if ids:
@@ -614,7 +676,7 @@ def _reconcile_verdicts(res: RunResult) -> None:
                 cur[c.code] = ("ok", "нарушение не подтверждено верификатором")
             elif v not in ("ok", "na"):
                 cur[c.code] = ("ok", comment)
-    for c in SET_CRITERIA:
+    for c in res.prof.set:
         fs = [f for f in res.kept() if f.criterion == c.code]
         v, comment = res.set_verdicts.get(c.code, ("ok", ""))
         if fs:
@@ -653,7 +715,7 @@ def _fallback_conclusion(res: RunResult) -> Conclusion:
     return Conclusion(
         development_rationale=f"{res.decision_dev}.",
         testing_rationale=f"{res.decision_test}.",
-        fix_first=[FixItem(title=ALL[f.criterion].name, finding_ids=[f.fid], action=f.fix) for f in top],
+        fix_first=[FixItem(title=res.prof.name(f.criterion), finding_ids=[f.fid], action=f.fix) for f in top],
         overall=_stats_text(res),
     )
 
@@ -684,7 +746,7 @@ def _findings_block(findings: list[Finding], brief: bool = False) -> str:
             continue
         quotes = "; ".join(f"«{a.text}» (строка {a.line})" for a in f.anchors)
         out.append(
-            f"{f.fid} [{f.source}] критерий={f.criterion} ({ALL[f.criterion].name}) серьёзность={f.severity} "
+            f"{f.fid} [{f.source}] критерий={f.criterion} ({DEFAULT.name(f.criterion)}) серьёзность={f.severity} "
             f"ТР: {', '.join(f.req_ids) or 'документ'}\n"
             f"  цитаты: {quotes}\n  проблема: {f.problem}\n  исправление: {f.fix}"
         )

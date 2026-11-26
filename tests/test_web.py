@@ -1,5 +1,6 @@
 """Веб-API без сети: документы, маскирование, прогон с поддельной моделью, ответы, история, сравнение."""
 
+import threading
 import time
 from pathlib import Path
 
@@ -82,11 +83,53 @@ def test_full_loop(client):
     assert client.get("/api/runs/..%2F..%2Fsecret").status_code == 404
 
 
-def test_one_job_at_a_time_and_key_required(client, monkeypatch):
-    slow = JobRegistry(client_factory=lambda red, audit: (time.sleep(1), FakeClient(red))[1])
-    monkeypatch.setattr(api, "REGISTRY", slow)
-    assert client.post("/api/jobs", json={"document": "sample:requirements.md"}).status_code == 202
-    assert client.post("/api/jobs", json={"document": "sample:requirements.md"}).status_code == 409
-    monkeypatch.setenv("GEMINI_API_KEY", "")
-    monkeypatch.setattr(services, "has_env_key", lambda: False)
-    assert client.post("/api/jobs", json={"document": "sample:requirements.md"}).status_code == 400
+def test_parallel_jobs_queue_and_stop(client, monkeypatch):
+    """Две проверки идут одновременно, третья ждёт в очереди; остановка снимает её до начала."""
+    gate = threading.Event()
+
+    class SlowClient(FakeClient):
+        def generate(self, *a, **kw):
+            gate.wait(5)
+            return super().generate(*a, **kw)
+
+    reg = JobRegistry(client_factory=lambda red, audit: SlowClient(red), max_parallel=2)
+    monkeypatch.setattr(api, "REGISTRY", reg)
+    ids = [client.post("/api/jobs", json={"document": "sample:requirements.md"}).json()["id"] for _ in range(3)]
+    time.sleep(0.5)
+    statuses = [client.get(f"/api/jobs/{i}").json()["status"] for i in ids]
+    assert statuses.count("running") == 2 and statuses.count("queued") == 1
+    queued = ids[statuses.index("queued")]
+    assert client.post(f"/api/jobs/{queued}/stop").json()["stop_requested"]
+    running = [i for i in ids if i != queued]
+    client.post(f"/api/jobs/{running[0]}/stop")
+    gate.set()
+    for i in running[1:]:
+        _wait(client, i)
+    for i in (queued, running[0]):
+        for _ in range(100):
+            if client.get(f"/api/jobs/{i}").json()["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert client.get(f"/api/jobs/{i}").json()["status"] == "cancelled"
+    assert len(client.get("/api/jobs").json()) == 3
+
+
+def test_key_required_per_provider(client, monkeypatch):
+    monkeypatch.setattr(services, "has_env_key", lambda provider=None: provider == "gemini")
+    doc = {"document": "sample:requirements.md"}
+    assert client.post("/api/jobs", json={**doc, "options": {"provider": "anthropic"}}).status_code == 400
+    r = client.post("/api/jobs", json={**doc, "options": {"provider": "anthropic"}}, headers={"X-Api-Key": "sk-test"})
+    assert r.status_code == 202 and r.json()["provider"] == "anthropic"
+    assert client.post("/api/jobs", json={**doc, "options": {"standards": ["nope"]}}).status_code == 400
+
+
+def test_status_lists_providers_and_standards(client):
+    st = client.get("/api/status").json()
+    assert {p["id"] for p in st["providers"]} == {"gemini", "openai", "anthropic"}
+    ids = [s["id"] for s in st["standards"]]
+    assert ids[0] == "iso29148" and {"ieee830", "ears", "gost34602"} <= set(ids)
+    j = _wait(client, client.post("/api/jobs", json={"document": "sample:requirements.md",
+                                                     "options": {"standards": ["ears"]}}).json()["id"])
+    view = client.get(f"/api/runs/{j['run_id']}").json()
+    assert [s["id"] for s in view["standards"]] == ["iso29148", "ears"]
+    assert any(c["code"] == "ears_pattern" for c in view["criteria"])

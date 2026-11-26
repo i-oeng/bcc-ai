@@ -6,22 +6,11 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from .criteria import ALL, REQUIREMENT_CRITERIA, SET_CRITERIA, SEVERITIES, SEVERITY_RULES
+from .criteria import SEVERITIES, SEVERITY_RULES, Criterion
 from .grounding import Anchor
 from .pipeline import RunResult
 from .schemas import Finding
 
-SHORT = {
-    "necessary": "Необх.",
-    "appropriate": "Уместн.",
-    "unambiguous": "Однозн.",
-    "complete": "Полн.",
-    "singular": "Един.",
-    "feasible": "Выполн.",
-    "verifiable": "Провер.",
-    "correct": "Корр.",
-    "conforming": "Оформл.",
-}
 MARK = {"ok": "✅", "violation": "❌", "na": "·"}
 SET_MARK = {"ok": "✅ соответствует", "partial": "⚠️ частично", "violation": "❌ нарушено"}
 SEV_ICON = {"critical": "🔴", "major": "🟠", "minor": "🟡"}
@@ -44,6 +33,7 @@ class Renderer:
         self.res = res
         self.R = res.redactor.restore if res.redactor else (lambda s: s)
         self.by_id = {f.fid: f for f in res.findings}
+        self.P = res.prof  # стандарты проверки и их критерии
 
     # ---- форматирование ----
 
@@ -123,7 +113,7 @@ class Renderer:
             out += ["", "**Спросить у заказчика в первую очередь:**", ""]
             for i, q in blocking[:5]:
                 out.append(f"* [В-{i}](#в-{i}) {self.cell(q.question, 200)}")
-        out += ["", "Разделы: [паспорт](#1-паспорт-прогона) · [нарезка](#2-как-агент-нарезал-требования) · "
+        out += ["", "Разделы: [паспорт](#1-паспорт-проверки) · [нарезка](#2-как-агент-нарезал-требования) · "
                 "[требования](#3-проверка-каждого-требования) · [набор](#4-проверка-всего-набора-требований) · "
                 "[вопросы](#5-вопросы-для-уточнения) · [чек-лист](#6-чек-лист-ревью-требований) · [сводка](#сводка) · [итог](#итог)"]
         return "\n".join(out)
@@ -152,17 +142,17 @@ class Renderer:
             ("Название документа", self.cell(r.doc.title, model=False)),
             ("Файл", f"`{r.doc.path.name}` ({r.doc.fmt.upper()}, {len(r.doc.lines)} строк)"),
             ("SHA-256 файла", f"`{r.doc.sha256[:16]}…`"),
-            ("Дата прогона", r.started.strftime("%d.%m.%Y %H:%M") + f" ({r.config.tz.key})"),
+            ("Дата проверки", r.started.strftime("%d.%m.%Y %H:%M") + f" ({r.config.tz.key})"),
             ("Модель", model),
             ("Версия агента", r.agent_version),
-            ("Критерии", "ISO/IEC/IEEE 29148:2018 п. 5.2.5, 5.2.6; IEEE Std 830-1998 п. 4.3"),
+            ("Стандарты", self.P.cites()),
             ("Маскирование данных", red_txt),
         ]
         if u:
             rows.append(("Запросов к модели", f"{u.calls}; токенов: вход {u.prompt_tokens}, выход {u.output_tokens}"
                          + (f", рассуждение {u.thinking_tokens}" if u.thinking_tokens else "")))
         if u and getattr(u, "cached", 0):
-            rows.append(("Кэш ответов", f"шагов взято из кэша: {u.cached} (прогон продолжен после сбоя или повторён)"))
+            rows.append(("Кэш ответов", f"шагов взято из кэша: {u.cached} (проверка продолжена после сбоя или повторена)"))
         if dur:
             rows.append(("Длительность", dur))
         for w in getattr(r, "warnings", []) or []:
@@ -170,7 +160,7 @@ class Renderer:
         if r.audit_dir:
             rows.append(("Журнал запросов", f"`{_rel(r.audit_dir)}`"))
         body = "\n".join(f"| {k} | {v} |" for k, v in rows)
-        return f"## 1. Паспорт прогона\n\n| Поле | Значение |\n| :--- | :--- |\n{body}"
+        return f"## 1. Паспорт проверки\n\n| Поле | Значение |\n| :--- | :--- |\n{body}"
 
     def segmentation(self) -> str:
         r = self.res
@@ -200,7 +190,7 @@ class Renderer:
         return "\n".join(lines)
 
     def _finding(self, f: Finding, heading: bool = False) -> str:
-        crit = ALL[f.criterion]
+        crit = self.P.by_code.get(f.criterion) or Criterion(f.criterion, self.P.name(f.criterion), "", "")
         reqs = ", ".join(f"{x} ({self.cell(self.res.req(x).doc_id)})" for x in f.req_ids if self.res.req(x))
         src = "правило" if f.source == "rule" else "LLM"
         out = [
@@ -223,18 +213,18 @@ class Renderer:
 
     def per_requirement(self) -> str:
         r = self.res
-        head = "| ТР | ID в док. | " + " | ".join(SHORT[c.code] for c in REQUIREMENT_CRITERIA) + " |"
-        sep = "| :--- | :--- |" + " :---: |" * len(REQUIREMENT_CRITERIA)
+        head = "| ТР | ID в док. | " + " | ".join(c.column for c in self.P.requirement) + " |"
+        sep = "| :--- | :--- |" + " :---: |" * len(self.P.requirement)
         rows = []
         for q in r.requirements:
             v = r.req_verdicts.get(q.rid, {})
             rows.append(
                 f"| [{q.rid}](#{q.rid.lower()}) | {self.cell(q.doc_id, 28)} | "
-                + " | ".join(MARK.get(v.get(c.code, ("ok", ""))[0], "✅") for c in REQUIREMENT_CRITERIA) + " |"
+                + " | ".join(MARK.get(v.get(c.code, ("ok", ""))[0], "✅") for c in self.P.requirement) + " |"
             )
         legend = (
             "Обозначения: ✅ соответствует, ❌ нарушение (см. находки), · не применимо. Столбцы: "
-            + "; ".join(f"{SHORT[c.code]} = {c.name} ({c.source})" for c in REQUIREMENT_CRITERIA) + "."
+            + "; ".join(f"{c.column} = {c.name} ({c.source})" for c in self.P.requirement) + "."
         )
         out = ["## 3. Проверка каждого требования", "", "### 3.1. Матрица критериев", "", head, sep, *rows, "", legend, "",
                "### 3.2. Находки по требованиям"]
@@ -257,7 +247,7 @@ class Renderer:
                 out.append("Связанные находки уровня набора: " + ", ".join(self.fid_link(f.fid) for f in related) + ".")
             oks = [(c, v) for c, v in r.req_verdicts.get(q.rid, {}).items() if v[0] == "na" and v[1]]
             if oks:
-                out.append("Не применимо: " + "; ".join(f"{ALL[c].name}: {self.cell(v[1], 120)}" for c, v in oks) + ".")
+                out.append("Не применимо: " + "; ".join(f"{self.P.name(c)}: {self.cell(v[1], 120)}" for c, v in oks) + ".")
             out += ["", "</details>"]
         return "\n".join(out)
 
@@ -265,7 +255,7 @@ class Renderer:
         r = self.res
         out = ["## 4. Проверка всего набора требований", "", "| Критерий | Источник | Оценка | Комментарий |",
                "| :--- | :--- | :--- | :--- |"]
-        for c in SET_CRITERIA:
+        for c in self.P.set:
             v, comment = r.set_verdicts.get(c.code, ("ok", ""))
             ids = [f.fid for f in r.kept() if f.criterion == c.code]
             note = self.cell(comment, 300)
@@ -283,12 +273,12 @@ class Renderer:
             uncovered = sum(1 for c in r.coverage if not c.acceptance_ids)
             out += ["", f"Без единого критерия приёмки: {uncovered} из {len(r.coverage)} функциональных требований."]
         kept_set = [f for f in r.kept() if f.scope == "set"]
-        order = [c.code for c in SET_CRITERIA] + [c.code for c in REQUIREMENT_CRITERIA]
+        order = [c.code for c in self.P.set] + [c.code for c in self.P.requirement]
         for code in order:
             fs = [f for f in kept_set if f.criterion == code]
             if not fs:
                 continue
-            out += ["", f"### {ALL[code].name}"]
+            out += ["", f"### {self.P.name(code)}"]
             for f in fs:
                 out += ["", self._finding(f, heading=True)]
         return "\n".join(out)
@@ -323,7 +313,7 @@ class Renderer:
                 if links:
                     out.append("* **Связанные находки:** " + ", ".join(self.fid_link(x) for x in links))
         out += ["", "Файл с этими вопросами и полями для ответов лежит рядом с отчётом (`*_questions.md`). "
-                "После ответов заказчика повторите прогон с `--answers`: агент закроет устранённые дефекты и пересчитает итог."]
+                "После ответов заказчика повторите проверку с `--answers`: агент закроет устранённые дефекты и пересчитает итог."]
         if r.answers:
             out += ["", "### Учтённые ответы заказчика", ""]
             for qa in r.answers:
@@ -375,7 +365,7 @@ class Renderer:
             "| :--- | :---: | :---: | :---: | :---: |",
         ]
         cnt = Counter((f.criterion, f.severity) for f in kept)
-        for c in REQUIREMENT_CRITERIA + SET_CRITERIA:
+        for c in self.P.requirement + self.P.set:
             tot = sum(cnt[(c.code, s)] for s in SEVERITIES)
             if tot:
                 out.append(f"| {c.name} | {cnt[(c.code, 'critical')]} | {cnt[(c.code, 'major')]} | {cnt[(c.code, 'minor')]} | {tot} |")
@@ -431,8 +421,8 @@ class Renderer:
             "2. Модель выделила требования; каждая цитата найдена в документе (точно или нечётко), иначе требование отброшено.",
             "3. Детерминированные правила проверили размытые слова, пустые поля шаблона, версию, приоритеты, единицы, "
             "семантику HTTP и коды ответа.",
-            "4. Модель проверила каждое требование по 9 критериям ISO/IEC/IEEE 29148 п. 5.2.5 и набор по критериям п. 5.2.6 "
-            "и IEEE 830 п. 4.3 (два отдельных прохода: противоречия; полнота и прочие свойства).",
+            f"4. Модель проверила каждое требование по {len(self.P.requirement)} критериям и набор по {len(self.P.set)} критериям "
+            f"({self.P.cites()}), набор двумя отдельными проходами: противоречия; полнота и прочие свойства.",
             "5. Находки без цитаты из документа отброшены. Остальные проверил независимый проход модели: отклонил домыслы, "
             "откалибровал серьёзность, объединил дубли.",
             "6. По подтверждённым находкам модель составила вопросы для уточнения и итог; решение о готовности принимает код.",
@@ -447,7 +437,7 @@ class Renderer:
                     "Показаны для прозрачности: эти находки не учтены в сводке.", "",
                     "| ID | Критерий | Находка | Причина отклонения |", "| :--- | :--- | :--- | :--- |"]
             for f in rejected:
-                out.append(f"| <a id=\"{f.fid.lower()}\"></a>{f.fid} | {ALL[f.criterion].name} | "
+                out.append(f"| <a id=\"{f.fid.lower()}\"></a>{f.fid} | {self.P.name(f.criterion)} | "
                            f"{self.cell(_first_sentence(f.problem), 200)} | {self.cell(f.verifier_note, 200)} |")
         dups = [f for f in r.findings if f.kept and f.duplicate_of]
         if dups:

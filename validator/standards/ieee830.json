@@ -1,0 +1,55 @@
+{
+  "id": "ieee830",
+  "order": 10,
+  "title": "IEEE Std 830-1998",
+  "cite": "IEEE Std 830-1998 (п. 4.3)",
+  "description": "Свойства хорошей спецификации требований к ПО: корректность, однозначность, полнота, непротиворечивость, ранжирование, проверяемость, модифицируемость, прослеживаемость.",
+  "criteria": [
+    {
+      "code": "unambiguous",
+      "source": "IEEE 830 4.3.2"
+    },
+    {
+      "code": "complete",
+      "source": "IEEE 830 4.3.3"
+    },
+    {
+      "code": "verifiable",
+      "source": "IEEE 830 4.3.6"
+    },
+    {
+      "code": "correct",
+      "source": "IEEE 830 4.3.1"
+    },
+    {
+      "code": "conforming",
+      "source": "IEEE 830 4.3.7, 4.3.8"
+    },
+    {
+      "code": "set_complete",
+      "source": "IEEE 830 4.3.3"
+    },
+    {
+      "code": "set_consistent",
+      "source": "IEEE 830 4.3.4"
+    },
+    {
+      "code": "set_traceable",
+      "source": "IEEE 830 4.3.8"
+    },
+    {
+      "code": "set_ranked",
+      "scope": "set",
+      "name": "Ранжирование",
+      "source": "IEEE 830 4.3.5",
+      "question": "Указаны важность и стабильность требований (приоритеты, обязательность)."
+    },
+    {
+      "code": "set_modifiable",
+      "scope": "set",
+      "name": "Модифицируемость",
+      "source": "IEEE 830 4.3.7",
+      "question": "Структура позволяет вносить изменения: нет избыточного дублирования, есть версия и согласование."
+    }
+  ]
+}

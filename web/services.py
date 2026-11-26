@@ -17,8 +17,8 @@ import markdown
 
 from validator import pipeline, report
 from validator.clarify import write_questions
-from validator.config import Config
-from validator.criteria import ALL
+from validator.config import PROVIDERS, Config, provider_defaults
+from validator.criteria import BASE_STANDARD, DEFAULT_STANDARDS, available, name as criterion_name
 from validator.redact import _PLACEHOLDER
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -91,12 +91,29 @@ class RunOptions:
     redact_ner: bool
     use_cache: bool
     fix: bool
+    provider: str = "gemini"
+    base_url: str = ""
+    standards: list[str] | None = None
+    parallel: int = 6
     api_key: str = ""  # ключ из заголовка запроса; живёт только в памяти задачи, на диск не пишется
 
 
-def default_options() -> RunOptions:
-    cfg = Config.load()
-    return RunOptions(cfg.model, cfg.fallbacks, cfg.batch_size, cfg.redact, cfg.redact_ner, cfg.cache_dir is not None, False)
+def default_options(provider: str | None = None) -> RunOptions:
+    cfg = Config.load(provider=provider)
+    return RunOptions(cfg.model, cfg.fallbacks, cfg.batch_size, cfg.redact, cfg.redact_ner, cfg.cache_dir is not None, False,
+                      cfg.provider, cfg.base_url or "", list(cfg.standards or DEFAULT_STANDARDS), cfg.parallel)
+
+
+def providers() -> list[dict]:
+    Config.load()  # подхватить .env
+    return [provider_defaults(p) for p in PROVIDERS]
+
+
+def standards() -> list[dict]:
+    return [{"id": s.id, "title": s.title, "description": s.description, "mandatory": s.id == BASE_STANDARD,
+             "default": s.id in DEFAULT_STANDARDS,
+             "criteria": [c.get("name") for c in s.criteria if c.get("name")]}
+            for s in sorted(available().values(), key=lambda s: s.order)]
 
 
 def public_options(o: RunOptions) -> dict:
@@ -105,13 +122,14 @@ def public_options(o: RunOptions) -> dict:
     return d
 
 
-def has_env_key() -> bool:
-    return bool(Config.load().api_key)
+def has_env_key(provider: str | None = None) -> bool:
+    return bool(Config.load(provider=provider).api_key)
 
 
 def make_config(o: RunOptions) -> Config:
-    cfg = Config.load(model=o.model, fallbacks=o.fallbacks, batch_size=o.batch_size, redact=o.redact,
-                      redact_ner=o.redact_ner, api_key=o.api_key.strip() or None)
+    cfg = Config.load(provider=o.provider, model=o.model, fallbacks=o.fallbacks, batch_size=o.batch_size, redact=o.redact,
+                      redact_ner=o.redact_ner, api_key=o.api_key.strip() or None, base_url=o.base_url.strip() or None,
+                      standards=o.standards or None, parallel=o.parallel)
     if not o.use_cache:
         cfg.cache_dir = None
     return cfg
@@ -127,6 +145,7 @@ def mask_preview(doc_id: str, o: RunOptions) -> dict:
     rows = [{"placeholder": ph, "kind": ph.strip("[]").rsplit("_", 1)[0], "value": _shorten(v)}
             for ph, v in (res.redactor.backward.items() if res.redactor else [])]
     return {"masked": masked, "masked_html": markdown_html(masked, highlight_placeholders=True),
+            "provider": o.provider,
             "replacements": rows, "enabled": o.redact}
 
 
@@ -146,7 +165,7 @@ def _runs_dir() -> Path:
 def run_dir(run_id: str) -> Path:
     d = _runs_dir() / run_id
     if Path(run_id).name != run_id or not (d / "state.pkl").is_file():
-        raise NotFound(f"Прогон {run_id!r} не найден")
+        raise NotFound(f"Проверка {run_id!r} не найдена")
     return d
 
 
@@ -167,6 +186,7 @@ def list_runs() -> list[dict]:
                 "started": r.get("started", ""), "requirements": len(r["requirements"]), "open_findings": len(op),
                 "critical": sum(1 for f in op if f["severity"] == "critical"),
                 "development": r.get("decision", {}).get("development", ""), "answered": bool(r.get("answers")),
+                "standards": r.get("standards", []), "provider": r.get("provider", ""),
             })
         except (KeyError, ValueError):
             continue
@@ -178,7 +198,7 @@ def load_run(run_id: str):
 
 
 def run_files(res) -> dict[str, Path]:
-    """Отчёт и сопутствующие файлы на диске (runs/web_reports/<прогон>/), создаются при первом обращении."""
+    """Отчёт и сопутствующие файлы на диске (runs/web_reports/<проверка>/), создаются при первом обращении."""
     d = WEB_REPORTS / res.audit_dir.name
     rp = d / f"{res.doc.path.stem}_report.md"
     if not rp.exists():
@@ -244,12 +264,12 @@ def run_view(res) -> dict:
                           "verdicts": {k: {"verdict": v, "comment": t(c)} for k, (v, c) in res.req_verdicts.get(q.rid, {}).items()}}
                          for q in res.requirements],
         "findings": [{"id": f.fid, "scope": f.scope, "criterion": f.criterion,
-                      "criterion_name": ALL[f.criterion].name if f.criterion in ALL else f.criterion,
+                      "criterion_name": res.prof.name(f.criterion),
                       "severity": f.severity, "req_ids": f.req_ids, "anchors": [anchor(a) for a in f.anchors],
                       "problem": t(f.problem), "fix": t(f.fix), "source": f.source,
                       "status": f.resolution or "open", "resolution_note": t(f.resolution_note)}
                      for f in res.kept()],
-        "set_verdicts": [{"criterion": k, "criterion_name": ALL[k].name if k in ALL else k, "verdict": v, "comment": t(c)}
+        "set_verdicts": [{"criterion": k, "criterion_name": res.prof.name(k), "verdict": v, "comment": t(c)}
                          for k, (v, c) in res.set_verdicts.items()],
         "questions": [{"id": f"В-{i}", "priority": q.priority, "priority_label": PRIORITY_LABEL.get(q.priority, q.priority),
                        "addressee": q.addressee, "question": t(q.question), "why": t(q.why),
@@ -261,7 +281,11 @@ def run_view(res) -> dict:
                        "finding_ids": c.finding_ids} for c in res.checklist],
         "coverage": [{"req_id": c.req_id, "acceptance_ids": c.acceptance_ids, "missing_scenarios": [t(s) for s in c.missing_scenarios]}
                      for c in res.coverage],
-        "passport": {"model": res.config.model, "calls": getattr(u, "calls", 0), "cached": getattr(u, "cached", 0),
+        "standards": [{"id": s.id, "title": s.title} for s in res.prof.standards],
+        "criteria": [{"code": c.code, "name": c.name, "column": c.column, "source": c.source}
+                     for c in res.prof.requirement],
+        "elapsed": round((res.finished - res.started).total_seconds()) if res.finished else None,
+        "passport": {"model": res.config.model, "provider": getattr(res.config, "provider", "gemini"), "calls": getattr(u, "calls", 0), "cached": getattr(u, "cached", 0),
                      "steps": [{"step": s, "model": m} for s, m in (u.steps if u else [])],
                      "masking": res.redactor.stats() if res.redactor else {}, "warnings": res.warnings},
         "has_fixed": res.fixed is not None,
@@ -303,7 +327,7 @@ def compare(run_a: str, run_b: str) -> dict:
                 "by_criterion": Counter(f["criterion"] for f in op)}
 
     a, b = stats(run_a), stats(run_b)
-    crit = [{"criterion": c, "name": ALL[c].name if c in ALL else c, "before": a["by_criterion"][c], "after": b["by_criterion"][c]}
+    crit = [{"criterion": c, "name": criterion_name(c), "before": a["by_criterion"][c], "after": b["by_criterion"][c]}
             for c in sorted(set(a["by_criterion"]) | set(b["by_criterion"]), key=lambda c: -a["by_criterion"][c])]
     for s in (a, b):
         s.pop("by_criterion")

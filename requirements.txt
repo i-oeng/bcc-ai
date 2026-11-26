@@ -1,5 +1,7 @@
 # Проверено на Python 3.12 (Windows 11) с этими версиями
 google-genai==3.6.1
+anthropic==2.14.0
+openai==3.60.0
 pydantic==2.14.4
 python-dotenv==1.2.4
 pymupdf==2.1

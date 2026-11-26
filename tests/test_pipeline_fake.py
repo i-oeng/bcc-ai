@@ -125,7 +125,7 @@ def test_end_to_end(tmp_path, monkeypatch):
     assert kept_ids == [f"Н-{i:02d}" for i in range(1, len(kept_ids) + 1)]
     out = report.write(res, tmp_path / "report.md")
     text = out.read_text(encoding="utf-8")
-    for section in ["## 1. Паспорт прогона", "## 2. Как агент нарезал требования", "## 3. Проверка каждого требования",
+    for section in ["## 1. Паспорт проверки", "## 2. Как агент нарезал требования", "## 3. Проверка каждого требования",
                     "## 4. Проверка всего набора требований", "## 5. Вопросы для уточнения", "## 6. Чек-лист ревью требований",
                     "## 7. Сводка", "## 8. Итог", "## Кратко", "Покрытие функциональных требований"]:
         assert section in text, section
@@ -173,3 +173,34 @@ def test_answers_loop_and_fixed_document(tmp_path, monkeypatch):
     body = out.read_text(encoding="utf-8")
     assert "Закрыто ответом заказчика" in body and "Учтённые ответы заказчика" in body and "Приложение D" in body
     assert extras["Исправленная редакция документа"].read_text(encoding="utf-8").startswith("# Исправлено")
+
+
+def test_standards_change_prompts_and_report(tmp_path):
+    """EARS добавляет критерий в промпт проверки и колонку в матрицу; без IEEE 830 нет ранжирования."""
+    cfg = Config.load(runs_dir=str(tmp_path / "runs"), redact_ner=False, standards=["ears"])
+    fake = {}
+    res = pipeline.run(str(SAMPLE), cfg, log=lambda *_: None,
+                       client_factory=lambda red, audit: fake.setdefault("c", FakeClient(red)))
+    review = next(p for n, p in fake["c"].prompts if n.startswith("review"))
+    assert "ears_pattern" in review and "из 10 критериев" in review
+    assert res.prof.ids == ["iso29148", "ears"]
+    assert all(f.criterion not in ("set_ranked", "set_modifiable") for f in res.findings)
+    text = report.write(res, tmp_path / "r.md").read_text(encoding="utf-8")
+    assert "| EARS |" in text and "EARS (Easy Approach" in text
+
+
+def test_stop_between_steps(tmp_path):
+    import pytest
+
+    from validator.llm import Cancelled
+
+    calls = {"n": 0}
+
+    def stop():
+        calls["n"] += 1
+        return calls["n"] > 2  # после нарезки
+
+    cfg = Config.load(runs_dir=str(tmp_path / "runs"), redact_ner=False)
+    with pytest.raises(Cancelled):
+        pipeline.run(str(SAMPLE), cfg, log=lambda *_: None, client_factory=lambda red, audit: FakeClient(red),
+                     should_stop=stop)

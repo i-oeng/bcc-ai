@@ -3,8 +3,9 @@
     python -m web            # http://127.0.0.1:8000
 
 Документация API со всеми схемами: http://127.0.0.1:8000/docs
-Ключ Gemini берётся из .env; без него клиент может передать свой в заголовке
-X-Gemini-Key (только для запуска прогона, на диск не пишется).
+Ключ провайдера (Gemini, OpenAI-совместимый, Anthropic) берётся из .env; без него
+клиент может передать свой в заголовке X-Api-Key (только для запуска проверки,
+на диск не пишется). Несколько проверок идут одновременно, остальные ждут в очереди.
 """
 
 from __future__ import annotations
@@ -20,14 +21,14 @@ from pydantic import BaseModel, Field
 from validator import __version__
 
 from . import services
-from .jobs import Busy, JobRegistry
+from .jobs import JobRegistry
 
 STATIC = Path(__file__).resolve().parent / "static"
 mimetypes.add_type("font/woff2", ".woff2")  # в реестре Windows его может не быть
 MAX_UPLOAD = 20 * 1024 * 1024
 
 app = FastAPI(title="Агент проверки требований", version=__version__,
-              description="Статическая проверка требований по ISO/IEC/IEEE 29148 и IEEE 830")
+              description="Статическая проверка требований по ISO/IEC/IEEE 29148, IEEE 830 и другим стандартам")
 REGISTRY = JobRegistry()
 
 
@@ -44,7 +45,11 @@ async def fonts_cors(request, call_next):
 
 
 class Options(BaseModel):
-    """Настройки прогона; не переданные поля берутся из .env."""
+    """Настройки проверки; не переданные поля берутся из .env."""
+    provider: str | None = Field(None, pattern="^(gemini|openai|anthropic)$")
+    base_url: str | None = Field(None, description="Только для OpenAI-совместимых серверов")
+    standards: list[str] | None = Field(None, description="ID стандартов (/api/standards); ISO 29148 включён всегда")
+    parallel: int | None = Field(None, ge=1, le=16)
     model: str | None = None
     fallbacks: list[str] | None = None
     batch_size: int | None = Field(None, ge=1, le=40)
@@ -70,23 +75,33 @@ class AnswersRequest(BaseModel):
 
 
 def _options(o: Options, api_key: str | None = None) -> services.RunOptions:
-    base = services.default_options()
+    base = services.default_options(o.provider)
     for k, v in o.model_dump(exclude_none=True).items():
         setattr(base, k, v)
     base.api_key = (api_key or "").strip()
+    if base.standards:
+        from validator.criteria import StandardError, profile
+
+        try:
+            profile(base.standards)
+        except StandardError as e:
+            raise HTTPException(400, str(e)) from e
     return base
 
 
-def _need_key(api_key: str | None) -> None:
-    if not (api_key or "").strip() and not services.has_env_key():
-        raise HTTPException(400, "Нужен ключ Gemini API: впишите GEMINI_API_KEY в .env или передайте заголовок X-Gemini-Key")
+def _need_key(opts: services.RunOptions) -> None:
+    if opts.api_key or services.has_env_key(opts.provider) or (opts.provider == "openai" and opts.base_url):
+        return
+    env = {"gemini": "GEMINI_API_KEY", "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}[opts.provider]
+    raise HTTPException(400, f"Нужен ключ API: впишите {env} в .env или укажите ключ в настройках")
+
+
+def _key(x_api_key: str | None, x_gemini_key: str | None) -> str | None:
+    return x_api_key or x_gemini_key  # X-Gemini-Key оставлен для совместимости
 
 
 def _start(path, opts, answers_path=None) -> dict:
-    try:
-        return REGISTRY.start(path, opts, answers_path).public()
-    except Busy as e:
-        raise HTTPException(409, str(e)) from e
+    return REGISTRY.start(path, opts, answers_path).public()
 
 
 def _run(run_id: str):
@@ -101,10 +116,17 @@ def _run(run_id: str):
 
 @app.get("/api/status")
 def status():
-    running = REGISTRY.running()
-    return {"version": __version__, "has_env_key": services.has_env_key(),
-            "defaults": services.public_options(services.default_options()),
-            "formats": services.FORMATS, "running_job": running[0].jid if running else None}
+    d = services.default_options()
+    return {"version": __version__, "has_env_key": services.has_env_key(d.provider),
+            "defaults": services.public_options(d), "providers": services.providers(),
+            "standards": services.standards(), "formats": services.FORMATS,
+            "max_parallel": REGISTRY.max_parallel,
+            "active_jobs": [j.jid for j in REGISTRY.running()]}
+
+
+@app.get("/api/standards")
+def standards():
+    return services.standards()
 
 
 # ---------- документы ----------
@@ -148,17 +170,25 @@ def preview(req: PreviewRequest):
         raise HTTPException(400, str(e)) from e
 
 
-# ---------- прогоны ----------
+# ---------- проверки ----------
 
 
 @app.post("/api/jobs", status_code=202)
-def start_job(req: JobRequest, x_gemini_key: str | None = Header(None)):
-    _need_key(x_gemini_key)
+def start_job(req: JobRequest, x_api_key: str | None = Header(None), x_gemini_key: str | None = Header(None)):
+    """Поставить проверку в очередь. Для нескольких документов вызовите несколько раз: они пойдут параллельно."""
+    opts = _options(req.options, _key(x_api_key, x_gemini_key))
+    _need_key(opts)
     try:
         path = services.resolve_document(req.document)
     except services.NotFound as e:
         raise HTTPException(404, str(e)) from e
-    return _start(path, _options(req.options, x_gemini_key))
+    return _start(path, opts)
+
+
+@app.get("/api/jobs")
+def jobs():
+    """Все проверки этого запуска сервера (без журналов), новые первыми."""
+    return [j.public(with_log=False) for j in REGISTRY.all()]
 
 
 @app.get("/api/jobs/{job_id}")
@@ -167,6 +197,15 @@ def job(job_id: str, log_from: int = Query(0, ge=0, description="отдать ж
     if not j:
         raise HTTPException(404, "Задача не найдена")
     return j.public(log_from)
+
+
+@app.post("/api/jobs/{job_id}/stop")
+def stop_job(job_id: str):
+    """Остановить проверку. Готовые шаги остаются в кэше, повторный запуск продолжит с места остановки."""
+    j = REGISTRY.stop(job_id)
+    if not j:
+        raise HTTPException(404, "Задача не найдена")
+    return j.public(with_log=False)
 
 
 @app.get("/api/runs")
@@ -192,19 +231,22 @@ def run_file(run_id: str, kind: str):
     """kind: report | questions | fixed | result"""
     files = services.run_files(_run(run_id))
     if kind not in files:
-        raise HTTPException(404, "Такого файла у прогона нет")
+        raise HTTPException(404, "Такого файла у проверки нет")
     return FileResponse(files[kind], filename=files[kind].name)
 
 
 @app.post("/api/runs/{run_id}/answers", status_code=202)
-def answer(run_id: str, req: AnswersRequest, x_gemini_key: str | None = Header(None)):
-    """Ответы заказчика: повторный прогон закроет устранённые дефекты и пересчитает готовность."""
-    _need_key(x_gemini_key)
+def answer(run_id: str, req: AnswersRequest, x_api_key: str | None = Header(None), x_gemini_key: str | None = Header(None)):
+    """Ответы заказчика: повторная проверка закроет устранённые дефекты и пересчитает готовность."""
     res = _run(run_id)
+    if not req.options.standards:  # повторная проверка по тем же стандартам, что и исходная
+        req.options.standards = res.prof.ids
+    opts = _options(req.options, _key(x_api_key, x_gemini_key))
+    _need_key(opts)
     if not any(v.strip() for v in req.answers.values()):
         raise HTTPException(400, "Ни одного ответа не заполнено")
     path = services.write_answers(res, req.answers)
-    return _start(res.doc.path, _options(req.options, x_gemini_key), path)
+    return _start(res.doc.path, opts, path)
 
 
 @app.get("/api/compare")

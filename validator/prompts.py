@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from .criteria import REQUIREMENT_CRITERIA, SET_CRITERIA, SEVERITY_RULES, criteria_block
+from .criteria import DEFAULT, SEVERITY_RULES, Profile, criteria_block
 
-SYSTEM = f"""\
+
+def system(profile: Profile = DEFAULT) -> str:
+    return f"""\
 Ты ведущий аналитик требований и QA-инженер банка. Ты проводишь статическое ревью документа с требованиями \
-до начала разработки по ISO/IEC/IEEE 29148:2018 (п. 5.2.5, 5.2.6) и IEEE Std 830-1998 (п. 4.3). \
+до начала разработки по {profile.cites()}. \
 Ты ищешь дефекты формулировок: неоднозначность, непроверяемость, противоречия, пропуски, лишние проектные решения.
 
 Правила работы:
@@ -38,6 +40,9 @@ SYSTEM = f"""\
 - НФТ: метрика, перцентиль, точка начала и конца измерения, нагрузка; доступность; мониторинг; откат.
 - Тестируемость: критерии приёмки для каждого функционального требования, граничные и негативные сценарии.
 """
+
+
+SYSTEM = system(DEFAULT)
 
 
 def segmentation(numbered_doc: str) -> str:
@@ -77,7 +82,7 @@ def segmentation(numbered_doc: str) -> str:
 """
 
 
-def requirement_review(numbered_doc: str, batch: list[dict]) -> str:
+def requirement_review(numbered_doc: str, batch: list[dict], profile: Profile = DEFAULT) -> str:
     items = "\n".join(
         f"- {r['rid']} (в документе: {r['doc_id']}; раздел: {r['section']}; строки {r['lines']}): «{r['quote']}»"
         for r in batch
@@ -86,10 +91,10 @@ def requirement_review(numbered_doc: str, batch: list[dict]) -> str:
 Задача: проверь каждое требование из списка ниже по всем критериям отдельного требования.
 
 Критерии (коды):
-{criteria_block(REQUIREMENT_CRITERIA)}
+{criteria_block(profile.requirement)}
 
 Для каждого требования верни:
-- verdicts: по одному на каждый из 9 критериев: verdict = ok | violation | na, comment = короткое обоснование \
+- verdicts: по одному на каждый из {len(profile.requirement)} критериев: verdict = ok | violation | na, comment = короткое обоснование \
 (до 25 слов) с привязкой к тексту.
 - findings: по одной записи на каждый конкретный дефект (criterion, severity, quotes, problem, fix). \
 Если verdict = violation, должна быть хотя бы одна находка с этим критерием.
@@ -152,12 +157,12 @@ def set_consistency(numbered_doc: str, req_table: str, known: str) -> str:
 """
 
 
-def set_completeness(numbered_doc: str, req_table: str, known: str) -> str:
+def set_completeness(numbered_doc: str, req_table: str, known: str, profile: Profile = DEFAULT) -> str:
     return f"""\
 Задача: проверь набор требований целиком по критериям набора, кроме непротиворечивости.
 
 Критерии набора (коды):
-{criteria_block([c for c in SET_CRITERIA if c.code != "set_consistent"])}
+{criteria_block([c for c in profile.set if c.code != "set_consistent"])}
 
 Пройди систематически:
 1. Покрытие критериями приёмки: для каждого функционального требования есть ли критерий приёмки? Каких сценариев \
