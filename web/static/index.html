@@ -7,6 +7,7 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%223%22 fill=%22%2300AB75%22/%3E%3C/svg%3E">
   <link rel="stylesheet" href="static/fonts/fonts.css">
   <link rel="stylesheet" href="static/style.css">
+  <script>try { if (localStorage.getItem("validator.theme") === "dark") document.documentElement.dataset.theme = "dark"; } catch (e) {}</script>
 </head>
 <body>
   <!-- Вся работа с данными в app.js через /api (схемы: /docs). Оформление в style.css. -->
@@ -17,6 +18,7 @@
       <a href="#/history" data-route="history">История</a>
       <a href="#/compare" data-route="compare">До и после</a>
       <button id="settings-toggle" type="button">Настройки</button>
+      <button id="theme-toggle" type="button" aria-pressed="false">Тёмная тема</button>
     </nav>
   </header>
 

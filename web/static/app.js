@@ -605,7 +605,18 @@ function route() {
   if (page === "compare") showCompare();
 }
 
+function applyTheme(dark) {
+  if (dark) document.documentElement.dataset.theme = "dark";
+  else delete document.documentElement.dataset.theme;
+  const b = $("#theme-toggle");
+  b.textContent = dark ? "Светлая тема" : "Тёмная тема";
+  b.setAttribute("aria-pressed", String(dark));
+  try { localStorage.setItem("validator.theme", dark ? "dark" : "light"); } catch (e) { /* без сохранения */ }
+}
+
 async function init() {
+  applyTheme(document.documentElement.dataset.theme === "dark");
+  $("#theme-toggle").onclick = () => applyTheme(document.documentElement.dataset.theme !== "dark");
   $("#settings-toggle").onclick = () => { $("#settings").hidden = !$("#settings").hidden; };
   $("#settings-close").onclick = () => { $("#settings").hidden = true; };
   $("#opt-provider").onchange = () => { settings.fillProvider(settings.saved().perProvider?.[settings.provider()]); settings.read(); };
