@@ -133,3 +133,27 @@ def test_status_lists_providers_and_standards(client):
     view = client.get(f"/api/runs/{j['run_id']}").json()
     assert [s["id"] for s in view["standards"]] == ["iso29148", "ears"]
     assert any(c["code"] == "ears_pattern" for c in view["criteria"])
+
+
+def test_assistant_masks_question_and_restores_answer(client, monkeypatch):
+    import validator.llm as llm
+
+    sent = {}
+
+    class Spy(FakeClient):
+        def generate(self, name, system, prompt, schema):
+            sent["prompt"] = prompt
+            return super().generate(name, system, prompt, schema)
+
+    monkeypatch.setattr(llm, "make_client", lambda cfg, red, audit, log=None, should_stop=None: Spy(red))
+    rid = _wait(client, client.post("/api/jobs", json={"document": "sample:requirements.md"}).json()["id"])["run_id"]
+    fid = client.get(f"/api/runs/{rid}").json()["findings"][0]["id"]
+    r = client.post(f"/api/runs/{rid}/assistant", json={
+        "question": "Что если клиент платит картой 4111 1111 1111 1111?", "focus": {"type": "finding", "id": fid},
+        "history": [{"role": "user", "content": "привет"}, {"role": "assistant", "content": "Здравствуйте"}]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "4111 1111 1111 1111" not in sent["prompt"] and "[КАРТА_1]" in sent["prompt"]
+    assert fid in sent["prompt"] and "Пользователь: привет" in sent["prompt"]
+    assert body["answer"] == "Строка 2: пример 4111 1111 1111 1111"  # значение возвращено, тире заменено
+    assert body["suggested_text"].startswith("Система должна")

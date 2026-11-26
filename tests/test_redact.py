@@ -60,3 +60,19 @@ def test_amounts_are_not_cards():
 def test_custom_terms():
     r = Redactor(use_ner=False, extra_terms=["CardProc-Core"])
     assert "CardProc-Core" not in r.redact("Событие приходит из CardProc-Core.")
+
+
+def test_query_verbs_are_not_names_but_names_still_are():
+    """Вопрос помощнику: «Предложи…» не ФИО; имя и «Фамилия И.О.» маскируются; guard сравнивает слова целиком."""
+    from validator.redact import RedactionLeak, Redactor
+
+    r = Redactor()
+    assert r.redact_query("Предложи исправленную формулировку требования.") == "Предложи исправленную формулировку требования."
+    masked = r.redact_query("Что сказал Иван Петров? Согласовано: Ахметова А.К.")
+    assert "Иван Петров" not in masked and "Ахметова" not in masked
+    r.guard("Предложить исправление")  # «предложи» внутри другого слова не утечка
+    try:
+        r.guard("Ответ для Иван Петров")
+        raise AssertionError("guard пропустил имя")
+    except RedactionLeak:
+        pass

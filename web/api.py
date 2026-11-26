@@ -69,6 +69,13 @@ class JobRequest(BaseModel):
     options: Options = Options()
 
 
+class AssistantRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    history: list[dict] = Field(default_factory=list, description="[{'role': 'user'|'assistant', 'content': '...'}]")
+    focus: dict | None = Field(None, description="{'type': 'finding'|'requirement'|'question', 'id': 'Н-03'}")
+    options: Options = Options()
+
+
 class AnswersRequest(BaseModel):
     answers: dict[str, str] = Field(description="{'В-1': 'текст или Вариант N: …'}")
     options: Options = Options(fix=True)
@@ -247,6 +254,22 @@ def answer(run_id: str, req: AnswersRequest, x_api_key: str | None = Header(None
         raise HTTPException(400, "Ни одного ответа не заполнено")
     path = services.write_answers(res, req.answers)
     return _start(res.doc.path, opts, path)
+
+
+@app.post("/api/runs/{run_id}/assistant")
+def run_assistant(run_id: str, req: AssistantRequest, x_api_key: str | None = Header(None),
+                  x_gemini_key: str | None = Header(None)):
+    """ИИ-помощник: объяснить нарушение, разбить требование, предложить формулировку или тест-кейсы."""
+    from validator.llm import LLMError
+    from validator.redact import RedactionLeak
+
+    res = _run(run_id)
+    opts = _options(req.options, _key(x_api_key, x_gemini_key))
+    _need_key(opts)
+    try:
+        return services.assistant(res, req.question, req.history, req.focus, opts)
+    except (LLMError, RedactionLeak) as e:
+        raise HTTPException(502, f"Помощник не ответил: {e}") from e
 
 
 @app.get("/api/compare")

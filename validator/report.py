@@ -11,9 +11,10 @@ from .grounding import Anchor
 from .pipeline import RunResult
 from .schemas import Finding
 
-MARK = {"ok": "✅", "violation": "❌", "na": "·"}
-SET_MARK = {"ok": "✅ соответствует", "partial": "⚠️ частично", "violation": "❌ нарушено"}
-SEV_ICON = {"critical": "🔴", "major": "🟠", "minor": "🟡"}
+# без эмодзи: статус передаётся словом, а не значком или цветом
+MARK = {"ok": "", "violation": "×", "na": "н/п"}
+SET_MARK = {"ok": "соответствует", "partial": "частично", "violation": "нарушено"}
+SEV_SHORT = {"critical": "крит.", "major": "сущ.", "minor": "незн."}
 KIND = {
     "functional": "функциональное",
     "nonfunctional": "нефункциональное",
@@ -97,7 +98,7 @@ class Renderer:
             f"* **Разработка:** {r.decision_dev}.",
             f"* **Тестирование:** {r.decision_test}.",
             f"* **Требований:** {len(r.requirements)}; **открытых нарушений:** {len(open_)} "
-            f"(🔴 {sev['critical']} · 🟠 {sev['major']} · 🟡 {sev['minor']})"
+            f"(критичных {sev['critical']}, существенных {sev['major']}, незначительных {sev['minor']})"
             + (f"; закрыто ответами заказчика: {closed}" if closed else "")
             + f"; **вопросов заказчику:** {len(r.questions)}, из них блокирующих {len(blocking)}.",
         ]
@@ -194,7 +195,7 @@ class Renderer:
         reqs = ", ".join(f"{x} ({self.cell(self.res.req(x).doc_id)})" for x in f.req_ids if self.res.req(x))
         src = "правило" if f.source == "rule" else "LLM"
         out = [
-            f'<a id="{f.fid.lower()}"></a>**{f.fid}** {SEV_ICON[f.severity]} **{SEVERITIES[f.severity]}** · '
+            f'<a id="{f.fid.lower()}"></a>**{f.fid}** · **{SEVERITIES[f.severity]}** · '
             f"{crit.name} ({crit.source}) · источник: {src}" + (f" · {reqs}" if reqs and heading else ""),
             "",
             f"* **Проблема:** {self.t(f.problem)}",
@@ -203,9 +204,9 @@ class Renderer:
             out.append(f"* **Место:** {self.quote(a)}")
         out.append(f"* **Как исправить:** {self.t(f.fix)}")
         if f.resolution == "closed":
-            out.insert(0, f"> ✅ **Закрыто ответом заказчика.** {self.t(f.resolution_note)}\n")
+            out.insert(0, f"> **Закрыто ответом заказчика.** {self.t(f.resolution_note)}\n")
         elif f.resolution == "changed":
-            out.insert(0, f"> 🔄 **Уточнено ответом заказчика.** {self.t(f.resolution_note)}\n")
+            out.insert(0, f"> **Уточнено ответом заказчика.** {self.t(f.resolution_note)}\n")
         dups = [d for d in self.res.findings if d.kept and d.duplicate_of == f.fid]
         if dups:
             out.append("* **Совпадает с:** " + ", ".join(d.fid for d in dups) + " (объединены верификатором)")
@@ -220,10 +221,10 @@ class Renderer:
             v = r.req_verdicts.get(q.rid, {})
             rows.append(
                 f"| [{q.rid}](#{q.rid.lower()}) | {self.cell(q.doc_id, 28)} | "
-                + " | ".join(MARK.get(v.get(c.code, ("ok", ""))[0], "✅") for c in self.P.requirement) + " |"
+                + " | ".join(MARK.get(v.get(c.code, ("ok", ""))[0], "") for c in self.P.requirement) + " |"
             )
         legend = (
-            "Обозначения: ✅ соответствует, ❌ нарушение (см. находки), · не применимо. Столбцы: "
+            "Обозначения: × нарушение (см. находки), н/п не применимо, пустая клетка: соответствует. Столбцы: "
             + "; ".join(f"{c.column} = {c.name} ({c.source})" for c in self.P.requirement) + "."
         )
         out = ["## 3. Проверка каждого требования", "", "### 3.1. Матрица критериев", "", head, sep, *rows, "", legend, "",
@@ -234,7 +235,7 @@ class Renderer:
             own = [f for f in kept if f.scope == "requirement" and q.rid in f.req_ids]
             related = [f for f in kept if f.scope == "set" and q.rid in f.req_ids]
             sev = Counter(f.severity for f in own if f.resolution != "closed")
-            badge = " ".join(f"{SEV_ICON[k]}{sev[k]}" for k in ("critical", "major", "minor") if sev[k]) or "✅"
+            badge = ", ".join(f"{SEV_SHORT[k]} {sev[k]}" for k in ("critical", "major", "minor") if sev[k]) or "без нарушений"
             opened = " open" if sev["critical"] else ""
             out += ["", f'<a id="{q.rid.lower()}"></a>', f"<details{opened}><summary><b>{q.rid} · {self.cell(q.doc_id)}</b> · "
                     f"{self.cell(q.summary)} · {badge}</summary>", "",
@@ -267,7 +268,7 @@ class Renderer:
                     "| Требование | Проверяется критериями приёмки | Непокрытые сценарии |", "| :--- | :--- | :--- |"]
             for c in r.coverage:
                 q = r.req(c.req_id)
-                acc = ", ".join(f"{a} ({self.cell(r.req(a).doc_id)})" for a in c.acceptance_ids if r.req(a)) or "❌ нет"
+                acc = ", ".join(f"{a} ({self.cell(r.req(a).doc_id)})" for a in c.acceptance_ids if r.req(a)) or "нет"
                 miss = "; ".join(self.cell(m, 160) for m in c.missing_scenarios) or "нет"
                 out.append(f"| {c.req_id} ({self.cell(q.doc_id) if q else ''}) | {acc} | {miss} |")
             uncovered = sum(1 for c in r.coverage if not c.acceptance_ids)
@@ -327,7 +328,7 @@ class Renderer:
         r = self.res
         if not r.checklist:
             return ""
-        icon = {"да": "✅ Да", "нет": "❌ Нет", "не требуется": "· Не требуется"}
+        icon = {"да": "Да", "нет": "**Нет**", "не требуется": "Не требуется"}
         out = ["## 6. Чек-лист ревью требований", "",
                "В документе есть шаблонный чек-лист ревью с незаполненными отметками. Агент заполнил его за ревьюера "
                "по результатам проверки.", "",
@@ -354,14 +355,14 @@ class Renderer:
             f"* Требований выделено: **{len(r.requirements)}**.",
             f"* Требований с нарушениями на уровне отдельного требования: "
             f"**{len({x for f in kept if f.scope == 'requirement' for x in f.req_ids})}** из {len(r.requirements)}.",
-            f"* Открытых подтверждённых нарушений: **{len(kept)}** (🔴 критичных {by_sev['critical']}, 🟠 существенных "
-            f"{by_sev['major']}, 🟡 незначительных {by_sev['minor']})"
+            f"* Открытых подтверждённых нарушений: **{len(kept)}** (критичных {by_sev['critical']}, существенных "
+            f"{by_sev['major']}, незначительных {by_sev['minor']})"
             + (f"; ещё {closed_n} закрыто ответами заказчика." if closed_n else "."),
             f"* Отклонено верификатором: {len(rejected)}; объединено дублей: {len(dups)}; "
             f"отброшено без опоры на текст: {len(r.ungrounded)}.",
             f"* Вопросов для уточнения: {len(r.questions)} (блокирующих {sum(1 for q in r.questions if q.priority == 'blocking')}).",
             "",
-            "| Критерий | 🔴 | 🟠 | 🟡 | Всего |",
+            "| Критерий | Крит. | Сущ. | Незн. | Всего |",
             "| :--- | :---: | :---: | :---: | :---: |",
         ]
         cnt = Counter((f.criterion, f.severity) for f in kept)

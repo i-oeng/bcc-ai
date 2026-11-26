@@ -167,6 +167,12 @@ class FixedDocument(BaseModel):
     open_points: list[str] = Field(description="Что не удалось исправить без решения заказчика (помечено [УТОЧНИТЬ: ...])")
 
 
+class AssistantReply(BaseModel):
+    answer: str = Field(description="Ответ пользователю по-русски: коротко, по делу, со ссылками на строки и ID находок")
+    suggested_text: str = Field(description="Готовая формулировка для вставки в документ (исправленное требование, "
+                                            "разбивка на атомарные требования, тест-кейсы); пусто, если не нужна")
+
+
 class Conclusion(BaseModel):
     development_rationale: str
     testing_rationale: str

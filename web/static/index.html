@@ -53,6 +53,23 @@
     <p class="muted small">Ключ хранится только в памяти страницы и передаётся серверу при запуске проверки.</p>
   </aside>
 
+  <aside id="assistant" class="assistant" hidden aria-labelledby="assistant-title">
+    <div class="assistant-head">
+      <div>
+        <h2 id="assistant-title">ИИ-помощник</h2>
+        <p class="muted small">Ответы формирует модель по документу и результатам проверки. Проверяйте их перед использованием.</p>
+      </div>
+      <button type="button" class="sheet-close" id="assistant-close" aria-label="Закрыть помощника">×</button>
+    </div>
+    <div class="focus-chip" id="assistant-focus" hidden></div>
+    <div class="chat" id="chat" aria-live="polite"></div>
+    <div class="quick" id="quick"></div>
+    <form class="ask" id="ask">
+      <textarea id="ask-input" rows="2" placeholder="Спросите о документе или нарушении" aria-label="Вопрос помощнику"></textarea>
+      <button type="submit" class="btn primary" id="ask-send">Спросить</button>
+    </form>
+  </aside>
+
   <main>
     <section id="view-check" class="view">
       <h1 class="hero">Проверка требований.</h1>
@@ -78,37 +95,43 @@
     </section>
 
     <section id="view-result" class="view" hidden>
-      <h1 class="hero" id="res-title">Результат.</h1>
-      <p id="res-meta" class="tagline"></p>
       <div id="res-empty" class="box empty">Результата пока нет: запустите проверку или откройте прошлую в «Истории».</div>
       <div id="res-body" hidden>
-        <nav class="tabs" id="res-tabs">
-          <button data-tab="overview" class="active">Кратко</button>
-          <button data-tab="report">Отчёт</button>
-          <button data-tab="findings">Нарушения</button>
-          <button data-tab="requirements">Требования</button>
-          <button data-tab="questions">Вопросы</button>
-          <button data-tab="checklist">Чек-лист и покрытие</button>
-          <button data-tab="passport">Паспорт</button>
-          <button data-tab="files">Файлы</button>
-        </nav>
-        <div class="tabpanel">
-          <div id="tab-overview" class="tab"></div>
-          <div id="tab-report" class="tab" hidden><iframe id="report-frame" class="docframe" sandbox title="Отчёт"></iframe></div>
-          <div id="tab-findings" class="tab" hidden>
-            <div class="row toolbar">
-              <select id="f-sev"><option value="">Любая серьёзность</option><option value="critical">Критично</option><option value="major">Существенно</option><option value="minor">Незначительно</option></select>
-              <select id="f-status"><option value="">Любой статус</option><option value="open">Открыто</option><option value="closed">Закрыто ответом</option><option value="changed">Изменено ответом</option></select>
-              <input id="f-text" placeholder="Поиск">
-            </div>
-            <div id="findings-table"></div>
+        <header class="res-head">
+          <h1 class="hero" id="res-title">Результат.</h1>
+          <p id="res-meta" class="tagline"></p>
+          <p class="res-actions">
+            <button type="button" class="btn primary" id="assistant-open">ИИ-помощник</button>
+            <span id="res-files" class="muted"></span>
+          </p>
+        </header>
+
+        <div class="verdict box" id="res-verdict"></div>
+
+        <section class="res-section" aria-labelledby="h-findings">
+          <h2 id="h-findings">Нарушения</h2>
+          <div class="filterbar">
+            <div class="segmented" id="f-sev" role="group" aria-label="Серьёзность"></div>
+            <input id="f-text" type="search" placeholder="Поиск по нарушениям" aria-label="Поиск по нарушениям">
           </div>
-          <div id="tab-requirements" class="tab" hidden></div>
-          <div id="tab-questions" class="tab" hidden></div>
-          <div id="tab-checklist" class="tab" hidden></div>
-          <div id="tab-passport" class="tab" hidden></div>
-          <div id="tab-files" class="tab" hidden></div>
-        </div>
+          <div id="findings-list"></div>
+        </section>
+
+        <section class="res-section" aria-labelledby="h-questions" id="questions-section">
+          <h2 id="h-questions">Вопросы заказчику</h2>
+          <p class="muted">Ответьте за заказчика и перепроверьте: агент закроет дефекты, которые ответы устраняют.</p>
+          <div id="questions-list"></div>
+        </section>
+
+        <section class="res-section" aria-labelledby="h-more">
+          <h2 id="h-more">Подробности</h2>
+          <details class="more" data-more="requirements"><summary>Требования <span class="count" id="c-req"></span></summary><div id="more-requirements"></div></details>
+          <details class="more" data-more="checklist"><summary>Чек-лист ревью <span class="count" id="c-check"></span></summary><div id="more-checklist"></div></details>
+          <details class="more" data-more="coverage"><summary>Покрытие критериями приёмки <span class="count" id="c-cov"></span></summary><div id="more-coverage"></div></details>
+          <details class="more" data-more="set"><summary>Оценка набора требований</summary><div id="more-set"></div></details>
+          <details class="more" data-more="passport"><summary>Паспорт проверки</summary><div id="more-passport"></div></details>
+          <details class="more" data-more="report"><summary>Полный отчёт</summary><iframe id="report-frame" class="docframe" sandbox title="Отчёт"></iframe></details>
+        </section>
       </div>
     </section>
 

@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from validator.criteria import ALL  # noqa: E402
 
-SEV = [("critical", "🔴 критичных"), ("major", "🟠 существенных"), ("minor", "🟡 незначительных")]
+SEV = [("critical", "критичных"), ("major", "существенных"), ("minor", "незначительных")]
 
 
 def stats(path: str) -> dict:

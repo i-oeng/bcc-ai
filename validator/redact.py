@@ -136,7 +136,7 @@ class Redactor:
 
     # ---- поиск ----
 
-    def detect(self, text: str, with_ner: bool = True) -> list[Detection]:
+    def detect(self, text: str, with_ner: bool = True, query: bool = False) -> list[Detection]:
         found: list[Detection] = []
 
         def add(kind: str, m: re.Match, value: str | None = None):
@@ -169,10 +169,10 @@ class Redactor:
             for m in re.finditer(re.escape(term), text, re.I):
                 add("term", m)
         if with_ner and self.use_ner:
-            found.extend(self._ner_persons(text))
+            found.extend(self._ner_persons(text, query))
         return _resolve_overlaps(found, text)
 
-    def _ner_persons(self, text: str) -> list[Detection]:
+    def _ner_persons(self, text: str, query: bool = False) -> list[Detection]:
         try:
             if self._ner is None:
                 from natasha import Doc, NewsEmbedding, NewsNERTagger, Segmenter
@@ -197,6 +197,11 @@ class Redactor:
                     # одиночное слово с маленькой буквы или латиница: не ФИО
                     if not re.match(r"[А-ЯЁ]", val) or _PLACEHOLDER.search(val):
                         continue
+                    # вопрос пользователя: одно слово с заглавной в начале фразы, за которым идёт слово
+                    # со строчной, обычно глагол («Предложи формулировку»), а не имя
+                    if query and " " not in val.strip() and re.match(r"^\s*$|.*[.!?]\s*$", line[: s.start]) \
+                            and re.match(r"\s+[а-яё]", line[s.stop:]):
+                        continue
                     out.append(Detection("person", offset + s.start, offset + s.stop, val))
             offset += len(line) + 1
         return out
@@ -212,10 +217,14 @@ class Redactor:
             self.backward[ph] = value
         return self.forward[key]
 
-    def redact(self, text: str) -> str:
+    def redact_query(self, text: str) -> str:
+        """Маскирование короткого вопроса пользователя (ИИ-помощник): без ложных ФИО из глаголов в начале фразы."""
+        return self.redact(text, query=True)
+
+    def redact(self, text: str, query: bool = False) -> str:
         if not self.enabled:
             return text
-        dets = self.detect(text)
+        dets = self.detect(text, query=query)
         out: list[str] = []
         pos = 0
         for d in dets:
@@ -244,7 +253,7 @@ class Redactor:
         leaks = self.detect(clean, with_ner=False)
         # значения, которые уже замаскированы где-то ещё, тоже не должны встречаться
         for (kind, canon), _ph in self.forward.items():
-            if kind == "person" and canon and canon in _canon("person", clean):
+            if kind == "person" and canon and re.search(rf"(?<![\w]){re.escape(canon)}(?![\w])", _canon("person", clean)):
                 leaks.append(Detection(kind, 0, 0, canon))
         if leaks:
             kinds = ", ".join(sorted({KIND_LABEL[d.kind] for d in leaks}))

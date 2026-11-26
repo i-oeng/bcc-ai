@@ -7,6 +7,7 @@ from validator.config import Config
 from validator.llm import Usage
 from validator.schemas import (
     AnswerReview,
+    AssistantReply,
     Clarification,
     CompletenessReview,
     Conclusion,
@@ -81,6 +82,12 @@ class FakeClient:
                 "checklist": [{"item": "Требование может быть протестировано", "answer": "Нет",
                                "rationale": "Противоречие месяца", "finding_ids": ["Н-01"]}],
                 "overall": "Документ сырой."})
+        if schema is AssistantReply:
+            import re
+
+            m = re.search(r"\[КАРТА_\d+\]", prompt)
+            masked = m.group(0) if m else ""
+            return AssistantReply(answer=f"Строка 2 — пример {masked}".strip(), suggested_text="Система должна отправлять push.")
         if schema is AnswerReview:
             fid, last = None, None
             for ln in prompt.splitlines():
@@ -129,7 +136,7 @@ def test_end_to_end(tmp_path, monkeypatch):
                     "## 4. Проверка всего набора требований", "## 5. Вопросы для уточнения", "## 6. Чек-лист ревью требований",
                     "## 7. Сводка", "## 8. Итог", "## Кратко", "Покрытие функциональных требований"]:
         assert section in text, section
-    assert "❌ нет" in text  # Ф-1 без критериев приёмки
+    assert "| нет |" in text  # Ф-1 без критериев приёмки
     assert "строка" in text and "ТР-02" in text
     # состояние сохраняется, и отчёт перерисовывается без модели
     again = pipeline.load_state(res.audit_dir)

@@ -39,6 +39,7 @@ const api = {
   reportHtml: (id) => api.call("GET", `/api/runs/${encodeURIComponent(id)}/report`),
   fileUrl: (id, kind) => `/api/runs/${encodeURIComponent(id)}/files/${kind}`,
   answer: (id, answers, options) => api.call("POST", `/api/runs/${encodeURIComponent(id)}/answers`, { answers, options }),
+  assistant: (id, question, history, focus, options) => api.call("POST", `/api/runs/${encodeURIComponent(id)}/assistant`, { question, history, focus, options }),
   compare: (a, b) => api.call("GET", `/api/compare?before=${encodeURIComponent(a)}&after=${encodeURIComponent(b)}`),
 };
 
@@ -54,6 +55,8 @@ const state = {
   logs: {},             // id -> {text, next}
   polling: false,
   run: null,            // JSON /api/runs/<id>
+  filter: { sev: "", text: "", shown: 8 },
+  chats: {},            // id проверки -> реплики помощника
 };
 
 const settings = {
@@ -274,80 +277,154 @@ function renderJobs() {
 }
 
 // ---------- страница «Результат» ----------
+// Одна страница вместо вкладок: вердикт, нарушения карточками, вопросы, подробности в раскрывающихся блоках.
 
 // HTML документа или отчёта показываем только в iframe с sandbox (без скриптов), со своими стилями
 const docPage = (html) => `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="${location.origin}/static/doc.css"><body>${html}</body>`;
+const SEV_ORDER = ["critical", "major", "minor"];
+const PAGE = 8;  // сколько нарушений показывать сразу
+const firstSentence = (s) => { const m = String(s || "").match(/^.+?[.!?](\s|$)/); return (m ? m[0] : String(s || "")).trim(); };
+// цитата документа: ячейки таблиц из PDF приходят с «|», показываем их через точку
+const quote = (a) => `<blockquote>${esc(a.text.replace(/\s*\|\s*/g, " · ").replace(/^[\s·]+|[\s·]+$/g, ""))}${a.where ? `<cite>${esc(a.where)}</cite>` : ""}</blockquote>`;
+const sevTag = (sev) => `<span class="sev sev-${esc(sev)}">${esc(SEV[sev] || sev)}</span>`;
 
 async function showResult(runId) {
   if (!runId) runId = state.run?.id;
   $("#res-empty").hidden = !!runId;
   $("#res-body").hidden = !runId;
-  if (!runId) return;
+  if (!runId) { assistant.close(); return; }
   if (state.run?.id !== runId) {
     $("#res-title").textContent = "Загружаю…";
     try { state.run = await api.run(runId); } catch (e) { showError($("#res-meta"), e); return; }
+    state.filter = { sev: "", text: "", shown: PAGE };
+    document.querySelectorAll("details.more").forEach((d) => { d.open = false; });
+    assistant.reset();
   }
   const r = state.run;
   $("#res-title").textContent = r.document.title || r.document.name;
   $("#res-meta").textContent = `${r.document.name} · проверка от ${new Date(r.started).toLocaleString("ru-RU")}`
-    + (r.elapsed ? ` · ${fmtTime(r.elapsed)}` : "");
-  renderOverview(r); renderFindings(r); renderRequirements(r); renderQuestions(r); renderChecklist(r); renderPassport(r); renderFiles(r);
-  api.reportHtml(r.id).then((html) => { $("#report-frame").srcdoc = docPage(html); });
+    + (r.elapsed ? ` · ${fmtTime(r.elapsed)}` : "") + ` · ${r.standards.map((x) => x.title).join(", ")}`;
+  const files = [["report", "отчёт"], ["questions", "вопросы"], ...(r.has_fixed ? [["fixed", "исправленная редакция"]] : []), ["result", "JSON"]];
+  $("#res-files").innerHTML = "Скачать: " + files.map(([k, l]) => `<a href="${api.fileUrl(r.id, k)}">${esc(l)}</a>`).join(" · ");
+  renderVerdict(r); renderSevFilter(r); renderFindings(r); renderQuestions(r); renderMore(r);
 }
 
-function renderOverview(r) {
+function verdictWord(text) {
+  const t = String(text || "").toUpperCase();
+  if (t.startsWith("НЕЛЬЗЯ")) return ["stop", "нельзя"];
+  if (t.includes("ОГОВОРК")) return ["warn", "с оговорками"];
+  return ["go", "можно"];
+}
+
+function renderVerdict(r) {
   const s = r.summary, d = r.decision;
-  $("#tab-overview").innerHTML = figures([["требований", s.requirements], ["открытых нарушений", s.open], ["критичных", s.critical, "critical"],
-    ["существенных", s.major, "major"], ["незначительных", s.minor, "minor"], ["вопросов", s.questions], ...(s.closed ? [["закрыто ответами", s.closed]] : [])])
-    + `<p><b>Разработка:</b> ${esc(d.development)}<br><span class="muted">${esc(d.development_rationale)}</span></p>`
-    + `<p><b>Тестирование:</b> ${esc(d.testing)}<br><span class="muted">${esc(d.testing_rationale)}</span></p>`
-    + `<p>${esc(d.overall)}</p>`
-    + (d.fix_first.length ? `<h3>Исправить в первую очередь</h3><ol>${d.fix_first.map((x) => `<li><b>${esc(x.title)}</b> (${esc(x.finding_ids.join(", "))}): ${esc(x.action)}</li>`).join("")}</ol>` : "")
-    + `<p class="muted small">Стандарты: ${esc(r.standards.map((x) => x.title).join(", "))}</p>`;
+  const [cls, word] = verdictWord(d.development);
+  const [tcls, tword] = verdictWord(d.testing);
+  const fix = d.fix_first || [];
+  $("#res-verdict").className = `verdict box ${cls}`;
+  $("#res-verdict").innerHTML = `
+    <div class="verdict-main">
+      <p class="verdict-line">Разработку начинать <b>${esc(word)}</b>. Тесты проектировать <b class="${tcls}">${esc(tword)}</b>.</p>
+      <p class="muted">${esc(d.development_rationale || d.development)}</p>
+      ${figures([["открытых нарушений", s.open], ["критичных", s.critical, "critical"], ["существенных", s.major, "major"],
+                 ["незначительных", s.minor, "minor"], ["вопросов", s.questions], ...(s.closed ? [["закрыто ответами", s.closed]] : [])])}
+    </div>
+    ${fix.length ? `<div class="verdict-fix">
+      <h3>Исправить в первую очередь</h3>
+      <ol>${fix.slice(0, 3).map((x) => `<li><b>${esc(x.title)}.</b> ${esc(x.action)} <span class="muted">${esc(x.finding_ids.join(", "))}</span></li>`).join("")}</ol>
+      ${fix.length > 3 ? `<details class="inline"><summary>Ещё ${fix.length - 3}</summary><ol start="4">${fix.slice(3).map((x) => `<li><b>${esc(x.title)}.</b> ${esc(x.action)} <span class="muted">${esc(x.finding_ids.join(", "))}</span></li>`).join("")}</ol></details>` : ""}
+    </div>` : ""}`;
+}
+
+function renderSevFilter(r) {
+  const open = r.findings.filter((f) => f.status !== "closed");
+  const n = (sev) => open.filter((f) => !sev || f.severity === sev).length;
+  const items = [["", "Все"], ["critical", "Критичные"], ["major", "Существенные"], ["minor", "Незначительные"]];
+  $("#f-sev").innerHTML = items.map(([v, l]) =>
+    `<button type="button" data-sev="${v}" aria-pressed="${state.filter.sev === v}" class="${state.filter.sev === v ? "on" : ""}">${l} <span class="count">${n(v)}</span></button>`).join("");
+  $("#f-sev").querySelectorAll("button").forEach((b) => {
+    b.onclick = () => { state.filter.sev = b.dataset.sev; state.filter.shown = PAGE; renderSevFilter(r); renderFindings(r); };
+  });
 }
 
 function renderFindings(r) {
-  const sev = $("#f-sev").value, status = $("#f-status").value, q = $("#f-text").value.toLowerCase();
-  const rows = r.findings.filter((f) => (!sev || f.severity === sev) && (!status || f.status === status)
-    && (!q || `${f.id} ${f.problem} ${f.fix} ${f.criterion_name}`.toLowerCase().includes(q)));
-  $("#findings-table").innerHTML = `<p class="muted">Показано: ${rows.length} из ${r.findings.length}</p>` + table(rows, [
-    ["id", "ID"],
-    ["severity", "Серьёзность", (v) => `<span class="sev-${esc(v)}">${esc(SEV[v] || v)}</span>`],
-    ["criterion_name", "Критерий"],
-    ["req_ids", "Требования", (v) => esc(v.join(", "))],
-    ["anchors", "Где и цитата", (v) => v.slice(0, 2).map((a) => `${esc(a.where)}<br><i>«${esc(a.text.slice(0, 200))}»</i>`).join("<hr>")],
-    ["problem", "Проблема"],
-    ["fix", "Исправление"],
-    ["status", "Статус", (v, f) => esc(STATUS[v] || v) + (f.resolution_note ? `<br><span class="muted">${esc(f.resolution_note)}</span>` : "")],
-  ]);
-}
-
-function renderRequirements(r) {
-  $("#tab-requirements").innerHTML = table(r.requirements, [
-    ["id", "ID"], ["doc_id", "В документе"], ["kind", "Тип"], ["summary", "Суть"], ["where", "Где"], ["open_findings", "Нарушений"],
-  ]);
+  const { sev, text } = state.filter;
+  const q = text.toLowerCase();
+  const rows = r.findings
+    .filter((f) => (!sev || f.severity === sev) && (!q || `${f.id} ${f.problem} ${f.fix} ${f.criterion_name} ${f.req_ids.join(" ")}`.toLowerCase().includes(q)))
+    .sort((a, b) => (a.status === "closed") - (b.status === "closed") || SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity));
+  const shown = rows.slice(0, state.filter.shown);
+  const el = $("#findings-list");
+  if (!rows.length) { el.innerHTML = `<p class="muted">Ничего не найдено.</p>`; return; }
+  el.innerHTML = shown.map((f) => {
+    const where = f.anchors[0] ? f.anchors[0].where.replace(/, раздел.*$/, "") : "";
+    return `<details class="card finding ${f.status === "closed" ? "closed" : ""}" data-fid="${esc(f.id)}">
+      <summary>
+        ${sevTag(f.severity)}
+        <span class="card-title">${esc(firstSentence(f.problem))}</span>
+        <span class="card-meta">${esc(f.id)}${f.req_ids.length ? " · " + esc(f.req_ids.join(", ")) : ""}${where ? " · " + esc(where) : ""}${f.status !== "open" ? " · " + esc(STATUS[f.status]) : ""}</span>
+      </summary>
+      <div class="card-body">
+        ${f.anchors.slice(0, 2).map(quote).join("")}
+        ${f.anchors.length > 2 ? `<details class="inline"><summary>Ещё цитаты: ${f.anchors.length - 2}</summary>${f.anchors.slice(2).map(quote).join("")}</details>` : ""}
+        <dl class="kv">
+          <dt>Проблема</dt><dd>${esc(f.problem)}</dd>
+          <dt>Как исправить</dt><dd>${esc(f.fix)}</dd>
+          <dt>Критерий</dt><dd>${esc(f.criterion_name)}</dd>
+          ${f.resolution_note ? `<dt>Ответ заказчика</dt><dd>${esc(f.resolution_note)}</dd>` : ""}
+        </dl>
+        <p class="card-actions">
+          <button type="button" class="btn small" data-ask="explain">Объяснить</button>
+          <button type="button" class="btn small" data-ask="rewrite">Предложить формулировку</button>
+          <button type="button" class="btn small" data-ask="split">Разбить на требования</button>
+        </p>
+      </div>
+    </details>`;
+  }).join("")
+    + (rows.length > shown.length ? `<p class="more-row"><button type="button" class="btn" id="findings-more">Показать ещё ${Math.min(PAGE, rows.length - shown.length)} из ${rows.length - shown.length}</button></p>` : "");
+  const more = $("#findings-more");
+  if (more) more.onclick = () => { state.filter.shown += PAGE; renderFindings(r); };
+  el.querySelectorAll("[data-ask]").forEach((b) => {
+    b.onclick = () => {
+      const fid = b.closest("[data-fid]").dataset.fid;
+      assistant.ask(QUICK[b.dataset.ask], { type: "finding", id: fid, label: `${fid}: ${firstSentence(r.findings.find((f) => f.id === fid).problem)}` });
+    };
+  });
 }
 
 function renderQuestions(r) {
-  const el = $("#tab-questions");
-  if (!r.questions.length) { el.innerHTML = `<p class="muted">Вопросов нет</p>`; return; }
+  const el = $("#questions-list");
+  $("#questions-section").hidden = !r.questions.length;
+  if (!r.questions.length) return;
   const prev = Object.fromEntries(r.answers.map((a) => [a.id, a.answer]));
-  el.innerHTML = `<p class="muted">Впишите ответы заказчика и запустите повторную проверку: агент закроет дефекты, которые ответы устраняют, и пересчитает готовность.</p>`
-    + r.questions.map((q) => {
-      const opts = q.options.map((o, i) => `Вариант ${i + 1}: ${o}`);
-      const own = prev[q.id] && !opts.includes(prev[q.id]) ? prev[q.id] : "";
-      return `<div class="question" data-qid="${esc(q.id)}">
-        <b>${esc(q.id)}. ${esc(q.question)}</b>
-        <div class="muted">${esc(q.priority_label)} · кому: ${esc(q.addressee)}</div>
-        ${q.quote ? `<div class="muted"><i>«${esc(q.quote.slice(0, 300))}»</i></div>` : ""}
-        <div class="muted">Почему важно: ${esc(q.why)}</div>
-        ${opts.map((o) => `<label><input type="radio" name="q-${esc(q.id)}" value="${esc(o)}" ${prev[q.id] === o ? "checked" : ""}> ${esc(o)}</label>`).join("")}
-        <label><input type="radio" name="q-${esc(q.id)}" value="__own" ${own ? "checked" : ""}> Свой ответ: <input class="own" value="${esc(own)}"></label>
-      </div>`;
-    }).join("")
-    + `<label class="check"><input id="ans-fix" type="checkbox" checked> Сформировать исправленную редакцию</label>
-       <div class="row actions"><button id="btn-answers" class="btn primary" type="button">Перепроверить с ответами</button></div><div id="answers-out"></div>`;
+  el.innerHTML = r.questions.map((q, i) => {
+    const opts = q.options.map((o, k) => `Вариант ${k + 1}: ${o}`);
+    const own = prev[q.id] && !opts.includes(prev[q.id]) ? prev[q.id] : "";
+    const answered = !!prev[q.id];
+    return `<details class="card question" data-qid="${esc(q.id)}" ${i === 0 && !answered ? "open" : ""}>
+      <summary>
+        <span class="tag ${q.priority === "blocking" ? "tag-strong" : ""}">${esc(q.priority_label)}</span>
+        <span class="card-title">${esc(q.question)}</span>
+        <span class="card-meta">${esc(q.addressee)}${answered ? " · отвечено" : ""}</span>
+      </summary>
+      <div class="card-body">
+        ${q.quote ? quote({ text: q.quote.slice(0, 300), where: "" }) : ""}
+        <p class="muted">Почему важно: ${esc(q.why)}</p>
+        <fieldset class="options"><legend>Ответ</legend>
+          ${opts.map((o) => `<label><input type="radio" name="q-${esc(q.id)}" value="${esc(o)}" ${prev[q.id] === o ? "checked" : ""}> ${esc(o)}</label>`).join("")}
+          <label><input type="radio" name="q-${esc(q.id)}" value="__own" ${own ? "checked" : ""}> Свой ответ: <input class="own" value="${esc(own)}" aria-label="Свой ответ"></label>
+        </fieldset>
+        <p class="card-actions"><button type="button" class="btn small" data-askq="${esc(q.id)}">Помочь с ответом</button></p>
+      </div>
+    </details>`;
+  }).join("")
+    + `<div class="row actions"><label class="check"><input id="ans-fix" type="checkbox" checked> Сформировать исправленную редакцию</label>
+       <button id="btn-answers" class="btn primary" type="button">Перепроверить с ответами</button></div><div id="answers-out"></div>`;
   $("#btn-answers").onclick = onAnswers;
+  el.querySelectorAll("[data-askq]").forEach((b) => {
+    b.onclick = () => assistant.ask("Какой вариант ответа выбрать и почему? Что изменится в требованиях при каждом варианте?",
+      { type: "question", id: b.dataset.askq, label: `${b.dataset.askq}: ${r.questions[Number(b.dataset.askq.replace(/\D/g, "")) - 1].question}` });
+  });
 }
 
 async function onAnswers() {
@@ -366,33 +443,91 @@ async function onAnswers() {
   } catch (e) { showError($("#answers-out"), e); }
 }
 
-function renderChecklist(r) {
-  $("#tab-checklist").innerHTML =
-    `<h3>Чек-лист ревью требований</h3>` + table(r.checklist, [["item", "Пункт"], ["answer", "Ответ"], ["rationale", "Обоснование"], ["finding_ids", "Находки", (v) => esc(v.join(", "))]])
-    + `<h3>Покрытие функциональных требований критериями приёмки</h3>` + table(r.coverage, [["req_id", "Требование"], ["acceptance_ids", "Критерии приёмки", (v) => esc(v.join(", ") || "нет")], ["missing_scenarios", "Непокрытые сценарии", (v) => esc(v.join("; "))]])
-    + `<h3>Критерии набора</h3>` + table(r.set_verdicts, [["criterion_name", "Критерий"], ["verdict", "Оценка"], ["comment", "Комментарий"]]);
-}
-
-function renderPassport(r) {
+function renderMore(r) {
+  $("#c-req").textContent = r.requirements.length;
+  $("#c-check").textContent = r.checklist.length ? `${r.checklist.filter((c) => c.answer.toLowerCase() === "да").length} из ${r.checklist.length}` : "нет";
+  $("#c-cov").textContent = r.coverage.length ? `без критериев: ${r.coverage.filter((c) => !c.acceptance_ids.length).length} из ${r.coverage.length}` : "";
+  $("#more-requirements").innerHTML = table(r.requirements, [
+    ["id", "ID"], ["doc_id", "В документе"], ["summary", "Суть"], ["where", "Где"],
+    ["open_findings", "Нарушений", (v, q) => (v ? `<button type="button" class="link" data-req="${esc(q.id)}">${v}</button>` : "")],
+  ]);
+  $("#more-requirements").querySelectorAll("[data-req]").forEach((b) => {
+    b.onclick = () => { state.filter = { sev: "", text: b.dataset.req, shown: 50 }; $("#f-text").value = b.dataset.req; renderSevFilter(r); renderFindings(r); $("#h-findings").scrollIntoView({ behavior: "smooth" }); };
+  });
+  $("#more-checklist").innerHTML = table(r.checklist, [["item", "Пункт"], ["answer", "Ответ"], ["rationale", "Обоснование"]]);
+  $("#more-coverage").innerHTML = table(r.coverage, [["req_id", "Требование"], ["acceptance_ids", "Критерии приёмки", (v) => esc(v.join(", ") || "нет")], ["missing_scenarios", "Не покрыто", (v) => esc(v.join("; "))]]);
+  const SET = { ok: "соответствует", partial: "частично", violation: "нарушено" };
+  $("#more-set").innerHTML = table(r.set_verdicts, [["criterion_name", "Критерий"], ["verdict", "Оценка", (v) => esc(SET[v] || v)], ["comment", "Комментарий"]]);
   const p = r.passport, m = Object.entries(p.masking);
-  $("#tab-passport").innerHTML = `<ul>
-      <li>Документ: ${esc(r.document.name)}, SHA-256 ${esc(r.document.sha256.slice(0, 16))}…</li>
-      <li>Стандарты: ${esc(r.standards.map((x) => x.title).join(", "))}</li>
-      <li>Версия агента: ${esc(r.agent_version)}; провайдер: ${esc(p.provider)}; модель: ${esc(p.model)}; запросов: ${p.calls}, из кэша: ${p.cached}${r.elapsed ? `; время: ${fmtTime(r.elapsed)}` : ""}</li>
-      <li>Маскирование: ${m.length ? esc(m.map(([k, v]) => `${k}: ${v}`).join(", ")) : "чувствительных данных не найдено"}</li>
-    </ul>` + table(p.steps, [["step", "Шаг"], ["model", "Модель"]])
-    + p.warnings.map((w) => `<p class="error">${esc(w)}</p>`).join("");
+  $("#more-passport").innerHTML = `<dl class="kv">
+      <dt>Документ</dt><dd>${esc(r.document.name)}, SHA-256 ${esc(r.document.sha256.slice(0, 16))}…</dd>
+      <dt>Стандарты</dt><dd>${esc(r.standards.map((x) => x.title).join(", "))}</dd>
+      <dt>Модель</dt><dd>${esc(p.provider)}, ${esc(p.model)}; запросов ${p.calls}, из кэша ${p.cached}</dd>
+      <dt>Агент</dt><dd>${esc(r.agent_version)}</dd>
+      <dt>Маскирование</dt><dd>${m.length ? esc(m.map(([k, v]) => `${k}: ${v}`).join(", ")) : "чувствительных данных не найдено"}</dd>
+    </dl>` + p.warnings.map((w) => `<p class="error">${esc(w)}</p>`).join("");
 }
 
-function renderFiles(r) {
-  const files = [["report", "Отчёт (Markdown)"], ["questions", "Вопросы заказчику"], ...(r.has_fixed ? [["fixed", "Исправленная редакция"]] : []), ["result", "result.json"]];
-  $("#tab-files").innerHTML = `<ul>${files.map(([k, label]) => `<li><a href="${api.fileUrl(r.id, k)}">${esc(label)}</a></li>`).join("")}</ul>`;
-}
+// ---------- ИИ-помощник ----------
 
-function switchTab(name) {
-  document.querySelectorAll("#res-tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
-  document.querySelectorAll("#res-body .tab").forEach((t) => { t.hidden = t.id !== `tab-${name}`; });
-}
+const QUICK = {
+  explain: "Объясни простыми словами, в чём проблема и чем она грозит.",
+  rewrite: "Предложи исправленную формулировку требования.",
+  split: "Разбей это требование на атомарные проверяемые требования.",
+  tests: "Какие тест-кейсы нужны, чтобы проверить это требование?",
+  question: "Какой вопрос задать заказчику, чтобы закрыть этот дефект?",
+};
+
+const QUICK_LABEL = { explain: "Объяснить", rewrite: "Формулировка", split: "Разбить", tests: "Тест-кейсы", question: "Вопрос заказчику" };
+
+const assistant = {
+  focus: null,
+  busy: false,
+  chat: () => (state.chats[state.run?.id] ||= []),
+  open() { $("#assistant").hidden = false; document.body.classList.add("with-assistant"); assistant.render(); $("#ask-input").focus(); },
+  close() { $("#assistant").hidden = true; document.body.classList.remove("with-assistant"); },
+  reset() { assistant.focus = null; assistant.render(); },
+  setFocus(f) { assistant.focus = f; assistant.render(); },
+  render() {
+    const fc = $("#assistant-focus");
+    fc.hidden = !assistant.focus;
+    if (assistant.focus) {
+      fc.innerHTML = `<span>Контекст: ${esc(assistant.focus.label)}</span><button type="button" class="link" id="focus-clear" aria-label="Убрать контекст">убрать</button>`;
+      $("#focus-clear").onclick = () => assistant.setFocus(null);
+    }
+    const msgs = assistant.chat();
+    $("#chat").innerHTML = (msgs.length ? "" : `<p class="muted chat-empty">Выберите нарушение и нажмите «Объяснить», или спросите о документе в целом.</p>`)
+      + msgs.map((m, i) => m.role === "user"
+        ? `<div class="msg user">${esc(m.content)}</div>`
+        : `<div class="msg bot ${m.error ? "err" : ""}">${esc(m.content)}${m.suggested ? `<div class="suggested"><pre>${esc(m.suggested)}</pre><button type="button" class="btn small" data-copy="${i}">Скопировать</button></div>` : ""}${m.model ? `<span class="msg-meta">${esc(m.model)}</span>` : ""}</div>`).join("")
+      + (assistant.busy ? `<div class="msg bot thinking" role="status">Помощник думает<span class="dots"></span></div>` : "");
+    $("#chat").querySelectorAll("[data-copy]").forEach((b) => {
+      b.onclick = async () => { await navigator.clipboard.writeText(msgs[Number(b.dataset.copy)].suggested); b.textContent = "Скопировано"; };
+    });
+    $("#chat").scrollTop = $("#chat").scrollHeight;
+    const quick = assistant.focus?.type === "finding" ? ["explain", "rewrite", "split", "tests", "question"] : ["explain", "tests"];
+    $("#quick").innerHTML = assistant.focus || msgs.length ? quick.map((k) => `<button type="button" class="chip" data-quick="${k}" title="${esc(QUICK[k])}">${esc(QUICK_LABEL[k])}</button>`).join("") : "";
+    $("#quick").querySelectorAll("[data-quick]").forEach((b) => { b.onclick = () => assistant.ask(QUICK[b.dataset.quick], assistant.focus); });
+    $("#ask-send").disabled = assistant.busy;
+  },
+  async ask(question, focus) {
+    if (!state.run || assistant.busy || !question.trim()) return;
+    if (focus !== undefined) assistant.focus = focus;
+    if ($("#assistant").hidden) assistant.open();
+    const msgs = assistant.chat();
+    const history = msgs.filter((m) => !m.error).map((m) => ({ role: m.role, content: m.content }));
+    msgs.push({ role: "user", content: question });
+    assistant.busy = true; assistant.render();
+    try {
+      const f = assistant.focus ? { type: assistant.focus.type, id: assistant.focus.id } : null;
+      const out = await api.assistant(state.run.id, question, history, f, settings.read());
+      msgs.push({ role: "assistant", content: out.answer, suggested: out.suggested_text, model: out.model });
+    } catch (e) {
+      msgs.push({ role: "assistant", content: e.message || String(e), error: true });
+    }
+    assistant.busy = false; assistant.render();
+  },
+};
 
 // ---------- страница «История» ----------
 
@@ -441,7 +576,7 @@ function route() {
   const [, page = "check", arg] = location.hash.split("/");
   document.querySelectorAll(".view").forEach((v) => { v.hidden = v.id !== `view-${page}`; });
   document.querySelectorAll("[data-route]").forEach((a) => a.classList.toggle("active", a.dataset.route === page));
-  if (page === "result") showResult(arg && decodeURIComponent(arg));
+  if (page === "result") showResult(arg && decodeURIComponent(arg)); else assistant.close();
   if (page === "history") showHistory();
   if (page === "compare") showCompare();
 }
@@ -457,8 +592,17 @@ async function init() {
   $("#file-input").onchange = onFiles;
   $("#btn-run").onclick = onRun;
   $("#btn-compare").onclick = onCompare;
-  document.querySelectorAll("#res-tabs button").forEach((b) => { b.onclick = () => switchTab(b.dataset.tab); });
-  ["#f-sev", "#f-status", "#f-text"].forEach((s) => { $(s).oninput = () => state.run && renderFindings(state.run); });
+  $("#f-text").oninput = (e) => { state.filter.text = e.target.value; state.filter.shown = 8; if (state.run) renderFindings(state.run); };
+  $("#assistant-open").onclick = () => assistant.open();
+  $("#assistant-close").onclick = () => assistant.close();
+  $("#ask").onsubmit = (e) => { e.preventDefault(); const v = $("#ask-input").value; $("#ask-input").value = ""; assistant.ask(v); };
+  $("#ask-input").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#ask").requestSubmit(); } };
+  document.querySelector('details[data-more="report"]').addEventListener("toggle", (e) => {
+    if (e.target.open && state.run && !$("#report-frame").dataset.run?.startsWith(state.run.id)) {
+      $("#report-frame").dataset.run = state.run.id;
+      api.reportHtml(state.run.id).then((html) => { $("#report-frame").srcdoc = docPage(html); });
+    }
+  });
   window.addEventListener("hashchange", route);
 
   state.status = await api.status();

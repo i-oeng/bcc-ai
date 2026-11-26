@@ -332,3 +332,62 @@ def compare(run_a: str, run_b: str) -> dict:
     for s in (a, b):
         s.pop("by_criterion")
     return {"before": a, "after": b, "by_criterion": crit}
+
+
+# ---------- ИИ-помощник ----------
+
+
+def assistant(res, question: str, history: list[dict], focus: dict | None, o: RunOptions) -> dict:
+    """Ответ помощника по результатам проверки.
+
+    Всё, что уходит в модель, маскируется той же таблицей замен, что и при проверке: вопрос
+    пользователя, прошлые реплики и контекст. Перед отправкой срабатывает тот же Redactor.guard().
+    """
+    import re as _re
+
+    from validator import prompts
+    from validator.llm import make_client
+    from validator.pipeline import _findings_block, _numbered
+    from validator.schemas import AssistantReply
+
+    red = res.redactor
+    mask = red.redact if red else (lambda s: s)
+    mask_q = red.redact_query if red else (lambda s: s)
+    unmask = red.restore if red else (lambda s: s)
+    masked_doc = (res.audit_dir / "masked_input.md").read_text(encoding="utf-8")
+
+    op = res.open_findings()
+    summary = (f"Разработка: {res.decision_dev}. Тестирование: {res.decision_test}.\n"
+               f"Требований {len(res.requirements)}, открытых нарушений {len(op)}.\n" + _findings_block(op, brief=True))
+
+    focus_txt = ""
+    if focus and focus.get("id"):
+        fid = focus["id"]
+        if focus.get("type") == "finding":
+            f = next((x for x in res.findings if x.fid == fid), None)
+            focus_txt = _findings_block([f]) if f else ""
+        elif focus.get("type") == "requirement":
+            q = res.req(fid)
+            if q:
+                own = [f for f in op if fid in f.req_ids]
+                focus_txt = (f"{q.rid} (в документе {q.doc_id}), строки {q.anchor.line}-{q.anchor.line_end}: «{q.quote}»\n"
+                             + (_findings_block(own) if own else "Нарушений по нему нет."))
+        elif focus.get("type") == "question":
+            i = int(_re.sub(r"\D", "", fid) or 0) - 1
+            if 0 <= i < len(res.questions):
+                qq = res.questions[i]
+                focus_txt = f"{fid}. {qq.question}\nПочему важно: {qq.why}\nВарианты: " + "; ".join(qq.options)
+        focus_txt = mask(focus_txt)
+
+    dialog = "\n".join(
+        ("Пользователь: " if h.get("role") == "user" else "Помощник: ") + mask_q(str(h.get("content", ""))[:1500])
+        for h in history[-6:]
+    )
+    cfg = make_config(o)
+    client = make_client(cfg, red, res.audit_dir / "assistant", log=lambda *_: None)
+    out = client.generate("assistant", prompts.ASSISTANT_SYSTEM,
+                          prompts.assistant(_numbered(masked_doc), summary, focus_txt, dialog, mask_q(question)),
+                          AssistantReply)
+    clean = lambda s: _re.sub(r"\s+[—–]\s+", ": ", unmask(s or "")).strip()  # noqa: E731
+    model = client.usage.steps[-1][1] if client.usage.steps else cfg.model
+    return {"answer": clean(out.answer), "suggested_text": clean(out.suggested_text), "model": model}
