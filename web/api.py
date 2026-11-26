@@ -206,6 +206,21 @@ def job(job_id: str, log_from: int = Query(0, ge=0, description="отдать ж
     return j.public(log_from)
 
 
+@app.post("/api/jobs/{job_id}/retry", status_code=202)
+def retry_job(job_id: str, x_api_key: str | None = Header(None), x_gemini_key: str | None = Header(None)):
+    """Повторить проверку из списка (после ошибки или остановки)."""
+    old = REGISTRY.get(job_id)
+    if not old:
+        raise HTTPException(404, "Задача не найдена")
+    if old.active:
+        raise HTTPException(409, "Проверка ещё идёт")
+    key = (_key(x_api_key, x_gemini_key) or "").strip()
+    import dataclasses
+
+    _need_key(dataclasses.replace(old.options, api_key=key))
+    return REGISTRY.retry(job_id, key).public()
+
+
 @app.post("/api/jobs/{job_id}/stop")
 def stop_job(job_id: str):
     """Остановить проверку. Готовые шаги остаются в кэше, повторный запуск продолжит с места остановки."""
@@ -216,8 +231,21 @@ def stop_job(job_id: str):
 
 
 @app.get("/api/runs")
-def runs():
-    return services.list_runs()
+def runs(all: bool = Query(False, description="включить незавершённые проверки (ошибка, остановка, обрыв)")):
+    active = {str(j.input_path.resolve()) for j in REGISTRY.running()}
+    return services.list_runs(include_unfinished=all, active_docs=active)
+
+
+@app.post("/api/runs/{run_id}/retry", status_code=202)
+def retry_run(run_id: str, x_api_key: str | None = Header(None), x_gemini_key: str | None = Header(None)):
+    """Повторить незавершённую проверку из истории с теми же настройками (готовые шаги из кэша)."""
+    try:
+        doc, opts, answers = services.retry_plan(run_id, services.default_options())
+    except services.NotFound as e:
+        raise HTTPException(404, str(e)) from e
+    opts.api_key = (_key(x_api_key, x_gemini_key) or "").strip()
+    _need_key(opts)
+    return _start(doc, opts, answers)
 
 
 @app.get("/api/runs/{run_id}")

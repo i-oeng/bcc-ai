@@ -18,7 +18,7 @@ DEFAULT_FALLBACKS = "gemini-3.8-flash,gemini-4-hydrogen,gemini-3.5-flash-lite,ge
 PROVIDERS = {
     "gemini": {"title": "Google Gemini", "key": "GEMINI_API_KEY", "prefix": "GEMINI",
                "model": DEFAULT_MODEL, "fallbacks": DEFAULT_FALLBACKS},
-    "openai": {"title": "OpenAI-совместимый API", "key": "OPENAI_API_KEY", "prefix": "OPENAI",
+    "openai": {"title": "Сервис, совместимый с OpenAI", "key": "OPENAI_API_KEY", "prefix": "OPENAI",
                "model": "gpt-5-mini", "fallbacks": ""},
     "anthropic": {"title": "Anthropic Claude", "key": "ANTHROPIC_API_KEY", "prefix": "ANTHROPIC",
                   "model": "claude-opus-5-5", "fallbacks": ""},

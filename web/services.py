@@ -169,28 +169,85 @@ def run_dir(run_id: str) -> Path:
     return d
 
 
-def list_runs() -> list[dict]:
+STATUS_RU = {"done": "готова", "running": "прервана", "error": "ошибка", "cancelled": "остановлена"}
+
+
+def _meta(d: Path) -> dict:
+    try:
+        return json.loads((d / "run.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def list_runs(include_unfinished: bool = False, active_docs: set[str] | None = None) -> list[dict]:
+    """Проверки из runs/, новые первыми. Готовые открываются; незавершённые (ошибка, остановка,
+    обрыв сервера) показываются, если include_unfinished, и их можно повторить из кэша."""
     out: list[dict] = []
     root = _runs_dir()
     if not root.is_dir():
         return out
+    active_docs = active_docs or set()
     for d in sorted(root.iterdir(), reverse=True):
-        rj = d / "result.json"
-        if not d.is_dir() or not (d / "state.pkl").is_file() or not rj.is_file():
+        if not d.is_dir():
             continue
-        try:
-            r = json.loads(rj.read_text(encoding="utf-8"))
-            op = _open_json(r)
-            out.append({
-                "id": d.name, "document": Path(r["document"]["path"]).name, "title": r["document"].get("title", ""),
-                "started": r.get("started", ""), "requirements": len(r["requirements"]), "open_findings": len(op),
-                "critical": sum(1 for f in op if f["severity"] == "critical"),
-                "development": r.get("decision", {}).get("development", ""), "answered": bool(r.get("answers")),
-                "standards": r.get("standards", []), "provider": r.get("provider", ""),
-            })
-        except (KeyError, ValueError):
+        meta, rj = _meta(d), d / "result.json"
+        done = (d / "state.pkl").is_file() and rj.is_file()
+        if meta.get("status") == "preview" or (not done and not meta):
+            continue  # предпросмотр маскирования или старая папка без сведений
+        if not done and not include_unfinished:
             continue
+        item = {"id": d.name, "document": meta.get("document_name", ""), "title": meta.get("title", ""),
+                "started": meta.get("started", ""), "status": "done" if done else meta.get("status", "running"),
+                "error": meta.get("error", ""), "can_open": done, "can_retry": False,
+                "standards": (meta.get("options") or {}).get("standards", []),
+                "provider": (meta.get("options") or {}).get("provider", "")}
+        if done:
+            try:
+                r = json.loads(rj.read_text(encoding="utf-8"))
+                op = _open_json(r)
+                item.update({
+                    "document": Path(r["document"]["path"]).name, "title": r["document"].get("title", ""),
+                    "started": r.get("started", ""), "requirements": len(r["requirements"]), "open_findings": len(op),
+                    "critical": sum(1 for f in op if f["severity"] == "critical"),
+                    "development": r.get("decision", {}).get("development", ""), "answered": bool(r.get("answers")),
+                    "standards": r.get("standards", item["standards"]), "provider": r.get("provider", item["provider"]),
+                    "seconds": r.get("seconds"),
+                })
+            except (KeyError, ValueError):
+                continue
+        else:
+            if item["status"] == "running" and meta.get("document") in active_docs:
+                item["status"] = "active"
+            item["can_retry"] = item["status"] != "active" and _allowed_document(meta.get("document"))
+        item["status_label"] = {"active": "идёт", **STATUS_RU}.get(item["status"], item["status"])
+        out.append(item)
     return out
+
+
+def _allowed_document(path: str | None) -> bool:
+    """Повторять можно только документы из samples/ и загрузок: путь берётся из run.json."""
+    if not path:
+        return False
+    p = Path(path).resolve()
+    return p.is_file() and any(base.resolve() in p.parents for base in (SAMPLES, UPLOADS))
+
+
+def retry_plan(run_id: str, fallback: RunOptions) -> tuple[Path, RunOptions, Path | None]:
+    """Документ и настройки незавершённой проверки для повторного запуска."""
+    d = _runs_dir() / run_id
+    meta = _meta(d) if Path(run_id).name == run_id else {}
+    if not meta or not _allowed_document(meta.get("document")):
+        raise NotFound(f"Проверку {run_id!r} нельзя повторить: нет сведений о документе")
+    o = meta.get("options") or {}
+    opts = RunOptions(
+        model=o.get("model") or fallback.model, fallbacks=o.get("fallbacks") or [], batch_size=o.get("batch_size") or fallback.batch_size,
+        redact=o.get("redact", True), redact_ner=o.get("redact_ner", True), use_cache=True, fix=bool(meta.get("fix")),
+        provider=o.get("provider") or fallback.provider, base_url=o.get("base_url") or "",
+        standards=o.get("standards") or fallback.standards, parallel=o.get("parallel") or fallback.parallel,
+        api_key=fallback.api_key,
+    )
+    ans = meta.get("answers_path")
+    return Path(meta["document"]), opts, Path(ans) if ans and Path(ans).is_file() else None
 
 
 def load_run(run_id: str):

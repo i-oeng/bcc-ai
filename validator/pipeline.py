@@ -107,7 +107,37 @@ def agent_version() -> str:
     return __version__
 
 
-def run(
+def run(input_path: str, cfg: Config, log=print, dry_run: bool = False, client_factory=None,
+        answers_path: str | None = None, fix: bool = False, should_stop=None) -> RunResult:
+    """Проверка документа. Статус и настройки пишутся в runs/<папка>/run.json: история показывает и
+    незавершённые проверки, а повтор берёт оттуда те же настройки (готовые шаги придут из кэша)."""
+    holder: dict = {}
+    try:
+        return _run(input_path, cfg, log, dry_run, client_factory, answers_path, fix, should_stop, holder)
+    except Cancelled:
+        write_meta(holder.get("audit"), status="cancelled", finished=datetime.now(cfg.tz).isoformat())
+        raise
+    except Exception as e:
+        write_meta(holder.get("audit"), status="error", error=str(e)[:600], finished=datetime.now(cfg.tz).isoformat())
+        raise
+
+
+def write_meta(audit: Path | None, **fields) -> None:
+    """Обновить runs/<папка>/run.json (статус проверки и её настройки)."""
+    import json
+
+    if not audit:
+        return
+    p = Path(audit) / "run.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except ValueError:
+        data = {}
+    data.update(fields)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _run(
     input_path: str,
     cfg: Config,
     log=print,
@@ -116,6 +146,7 @@ def run(
     answers_path: str | None = None,
     fix: bool = False,
     should_stop=None,
+    holder: dict | None = None,
 ) -> RunResult:
     """client_factory(redactor, audit_dir): свой клиент модели (для тестов); по умолчанию по cfg.provider.
 
@@ -153,6 +184,14 @@ def run(
         audit = Path(cfg.runs_dir) / f"{stamp}-{time.time_ns() % 100000}"
         audit.mkdir(parents=True)
     res.audit_dir = audit
+    if holder is not None:
+        holder["audit"] = audit
+    write_meta(audit, status="preview" if dry_run else "running", document=str(doc.path.resolve()),
+               document_name=doc.path.name, title=doc.title, started=started.isoformat(),
+               answers_path=str(Path(answers_path).resolve()) if answers_path else None, fix=fix,
+               options={"provider": cfg.provider, "model": cfg.model, "fallbacks": cfg.fallbacks,
+                        "base_url": cfg.base_url, "standards": prof.ids, "batch_size": cfg.batch_size,
+                        "parallel": cfg.parallel, "redact": cfg.redact, "redact_ner": cfg.redact_ner})
     (audit / "masked_input.md").write_text(masked, encoding="utf-8")
 
     if dry_run:
@@ -371,6 +410,7 @@ def run(
     res.finished = datetime.now(cfg.tz)
     save_json(res, audit / "result.json")
     save_state(res, audit / "state.pkl")
+    write_meta(audit, status="done", finished=res.finished.isoformat())
     return res
 
 

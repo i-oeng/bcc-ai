@@ -114,9 +114,9 @@ class Renderer:
             out += ["", "**Спросить у заказчика в первую очередь:**", ""]
             for i, q in blocking[:5]:
                 out.append(f"* [В-{i}](#в-{i}) {self.cell(q.question, 200)}")
-        out += ["", "Разделы: [паспорт](#1-паспорт-проверки) · [нарезка](#2-как-агент-нарезал-требования) · "
-                "[требования](#3-проверка-каждого-требования) · [набор](#4-проверка-всего-набора-требований) · "
-                "[вопросы](#5-вопросы-для-уточнения) · [чек-лист](#6-чек-лист-ревью-требований) · [сводка](#сводка) · [итог](#итог)"]
+        out += ["", "Разделы: [паспорт](#1-паспорт-проверки) / [нарезка](#2-как-агент-нарезал-требования) / "
+                "[требования](#3-проверка-каждого-требования) / [набор](#4-проверка-всего-набора-требований) / "
+                "[вопросы](#5-вопросы-для-уточнения) / [чек-лист](#6-чек-лист-ревью-требований) / [сводка](#сводка) / [итог](#итог)"]
         return "\n".join(out)
 
     def passport(self) -> str:
@@ -193,10 +193,10 @@ class Renderer:
     def _finding(self, f: Finding, heading: bool = False) -> str:
         crit = self.P.by_code.get(f.criterion) or Criterion(f.criterion, self.P.name(f.criterion), "", "")
         reqs = ", ".join(f"{x} ({self.cell(self.res.req(x).doc_id)})" for x in f.req_ids if self.res.req(x))
-        src = "правило" if f.source == "rule" else "LLM"
+        src = "правило" if f.source == "rule" else "модель"
         out = [
-            f'<a id="{f.fid.lower()}"></a>**{f.fid}** · **{SEVERITIES[f.severity]}** · '
-            f"{crit.name} ({crit.source}) · источник: {src}" + (f" · {reqs}" if reqs and heading else ""),
+            f'<a id="{f.fid.lower()}"></a>**{f.fid}** / **{SEVERITIES[f.severity]}** / '
+            f"{crit.name} ({crit.source}) / источник: {src}" + (f" / {reqs}" if reqs and heading else ""),
             "",
             f"* **Проблема:** {self.t(f.problem)}",
         ]
@@ -237,8 +237,8 @@ class Renderer:
             sev = Counter(f.severity for f in own if f.resolution != "closed")
             badge = ", ".join(f"{SEV_SHORT[k]} {sev[k]}" for k in ("critical", "major", "minor") if sev[k]) or "без нарушений"
             opened = " open" if sev["critical"] else ""
-            out += ["", f'<a id="{q.rid.lower()}"></a>', f"<details{opened}><summary><b>{q.rid} · {self.cell(q.doc_id)}</b> · "
-                    f"{self.cell(q.summary)} · {badge}</summary>", "",
+            out += ["", f'<a id="{q.rid.lower()}"></a>', f"<details{opened}><summary><b>{q.rid} / {self.cell(q.doc_id)}</b> / "
+                    f"{self.cell(q.summary)} / {badge}</summary>", "",
                     f"> {self.cell(q.quote, 400, model=False)}  ", f"> *{q.anchor.where()}*", ""]
             if not own:
                 out.append("Нарушений на уровне отдельного требования не подтверждено.")
@@ -390,7 +390,7 @@ class Renderer:
                 used.add(f.fid)
                 reqs = ", ".join(f"{x} ({self.cell(r.req(x).doc_id)})" for x in f.req_ids if r.req(x)) or "документ"
                 line = f.anchors[0].where() if f.anchors else ""
-                out.append(f"* {self.fid_link(f.fid)} · {reqs} · {line}: {self.cell(_first_sentence(f.problem), 260)}")
+                out.append(f"* {self.fid_link(f.fid)} / {reqs} / {line}: {self.cell(_first_sentence(f.problem), 260)}")
         return "\n".join(out)
 
     def verdict(self) -> str:

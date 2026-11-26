@@ -5,6 +5,10 @@
 проверок (по умолчанию 3), остальные ждут в очереди. Остановка срабатывает
 между шагами и во время пауз; ответы, полученные до остановки, остаются в
 кэше, и повторный запуск продолжит с того же места.
+
+Если проверка упала из-за модели (перегрузка, лимит, обрыв), она сама
+перезапускается до VALIDATOR_AUTO_RETRY раз (по умолчанию 2) после паузы;
+готовые шаги берутся из кэша, поэтому повтор стоит только недостающих запросов.
 """
 
 from __future__ import annotations
@@ -18,7 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from validator import pipeline
-from validator.llm import Cancelled
+from validator.llm import Cancelled, LLMError
+from validator.redact import RedactionLeak
 
 from .services import RunOptions, make_config
 
@@ -37,6 +42,7 @@ class Job:
     started: float | None = None
     finished: float | None = None
     stop_requested: bool = False
+    attempt: int = 1
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def write(self, *parts) -> None:
@@ -64,7 +70,7 @@ class Job:
                 "with_answers": self.answers_path is not None, "fix": self.options.fix,
                 "provider": self.options.provider, "model": self.options.model,
                 "elapsed": round(self.elapsed, 1), "run_id": self.run_id, "error": self.error,
-                "stop_requested": self.stop_requested, "last": last[0] if last else "",
+                "stop_requested": self.stop_requested, "last": last[0] if last else "", "attempt": self.attempt,
                 "log": lines, "log_next": log_offset + len(lines)}
 
 
@@ -73,6 +79,8 @@ class JobRegistry:
         self.jobs: dict[str, Job] = {}
         self.client_factory = client_factory  # для тестов: поддельная модель
         self.max_parallel = max_parallel or int(os.getenv("VALIDATOR_MAX_JOBS", "3"))
+        self.auto_retry = int(os.getenv("VALIDATOR_AUTO_RETRY", "2"))
+        self.retry_pause = float(os.getenv("VALIDATOR_RETRY_PAUSE", "45"))
         self._slots = threading.Semaphore(self.max_parallel)
         self._lock = threading.Lock()
 
@@ -93,6 +101,16 @@ class JobRegistry:
     def running(self) -> list[Job]:
         return [j for j in self.jobs.values() if j.active]
 
+    def retry(self, jid: str, api_key: str = "") -> Job | None:
+        """Повторить завершившуюся проверку с теми же настройками; готовые шаги придут из кэша."""
+        old = self.jobs.get(jid)
+        if not old or old.active:
+            return None
+        import dataclasses
+
+        opts = dataclasses.replace(old.options, api_key=api_key, use_cache=True)
+        return self.start(old.input_path, opts, old.answers_path)
+
     def stop(self, jid: str) -> Job | None:
         job = self.jobs.get(jid)
         if job and job.active:
@@ -110,11 +128,26 @@ class JobRegistry:
             if job.stop_requested:
                 raise Cancelled("Проверка остановлена до начала")
             job.status, job.started = "running", time.time()
-            res = pipeline.run(
-                str(job.input_path), make_config(job.options), log=job.write,
-                answers_path=str(job.answers_path) if job.answers_path else None, fix=job.options.fix,
-                client_factory=self.client_factory, should_stop=lambda: job.stop_requested,
-            )
+            while True:
+                try:
+                    res = pipeline.run(
+                        str(job.input_path), make_config(job.options), log=job.write,
+                        answers_path=str(job.answers_path) if job.answers_path else None, fix=job.options.fix,
+                        client_factory=self.client_factory, should_stop=lambda: job.stop_requested,
+                    )
+                    break
+                except (LLMError, RuntimeError) as e:
+                    # сбой модели: перезапуск, готовые шаги придут из кэша. Остановку и ошибки документа не повторяем.
+                    if isinstance(e, (Cancelled, RedactionLeak)) or job.attempt > self.auto_retry or job.stop_requested:
+                        raise
+                    job.write(f"Проверка не удалась: {_short(e)}. Перезапуск {job.attempt} из {self.auto_retry} "
+                              f"через {self.retry_pause:.0f} с, готовые шаги возьмутся из кэша.")
+                    job.attempt += 1
+                    end = time.time() + self.retry_pause
+                    while time.time() < end:
+                        if job.stop_requested:
+                            raise Cancelled("Проверка остановлена") from e
+                        time.sleep(0.5)
             job.run_id = res.audit_dir.name
             job.status = "done"
             job.write(f"Готово за {job.elapsed:.0f} с")
@@ -122,11 +155,22 @@ class JobRegistry:
             job.status = "cancelled"
             job.write("Проверка остановлена. Готовые шаги сохранены в кэше: повторный запуск продолжит с места остановки.")
         except Exception as e:  # noqa: BLE001  ошибку отдаём клиенту, поток не должен падать молча
-            job.error = f"{type(e).__name__}: {e}"
-            job.write(traceback.format_exc(limit=3))
+            job.error = _short(e)
+            job.write(f"Ошибка: {e}")
+            job.write(traceback.format_exc(limit=2))
             job.status = "error"
         finally:
             if acquired:
                 self._slots.release()
             job.options.api_key = ""  # ключ не держим в памяти дольше проверки
             job.finished = time.time()
+
+
+def _short(e: Exception) -> str:
+    """Короткое сообщение для интерфейса: русский текст ошибки без технического хвоста провайдера."""
+    msg = str(e).strip()
+    for cut in (" 503 ", " 429 ", " 500 ", " {", " Последняя ошибка:"):
+        i = msg.find(cut)
+        if i > 10:
+            msg = msg[:i].rstrip(" .:")
+    return msg[:300]

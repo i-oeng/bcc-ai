@@ -157,3 +157,43 @@ def test_assistant_masks_question_and_restores_answer(client, monkeypatch):
     assert fid in sent["prompt"] and "Пользователь: привет" in sent["prompt"]
     assert body["answer"] == "Строка 2: пример 4111 1111 1111 1111"  # значение возвращено, тире заменено
     assert body["suggested_text"].startswith("Система должна")
+
+
+def test_auto_retry_and_history_of_unfinished(client, monkeypatch):
+    """Сбой модели: проверка сама перезапускается; незавершённая проверка видна в истории и повторяется."""
+    from validator.llm import LLMError
+
+    calls = {"n": 0}
+
+    class Flaky(FakeClient):
+        def generate(self, name, *a, **kw):
+            if name == "segment":
+                calls["n"] += 1
+                if calls["n"] <= fails["n"]:
+                    raise LLMError("Шаг segment: ни одна модель не ответила 503 UNAVAILABLE {'error': 'x'}")
+            return super().generate(name, *a, **kw)
+
+    fails = {"n": 1}
+    reg = JobRegistry(client_factory=lambda red, audit: Flaky(red))
+    reg.retry_pause = 0.1
+    monkeypatch.setattr(api, "REGISTRY", reg)
+    j = _wait(client, client.post("/api/jobs", json={"document": "sample:requirements.md"}).json()["id"])
+    assert j["attempt"] == 2 and any("Перезапуск 1 из 2" in ln for ln in j["log"])
+
+    fails["n"], calls["n"] = 99, 0  # теперь модель недоступна совсем
+    jid = client.post("/api/jobs", json={"document": "sample:requirements.md"}).json()["id"]
+    for _ in range(100):
+        st = client.get(f"/api/jobs/{jid}").json()
+        if st["status"] != "running" and st["status"] != "queued":
+            break
+        time.sleep(0.1)
+    assert st["status"] == "error" and "503" not in st["error"] and calls["n"] == 3  # 1 + 2 перезапуска
+
+    hist = client.get("/api/runs?all=true").json()
+    failed = [r for r in hist if r["status"] == "error"]
+    assert failed and failed[0]["can_retry"] and failed[0]["document"] == "requirements.md"
+    assert all(r["status"] == "done" for r in client.get("/api/runs").json())
+    fails["n"] = 0
+    r = client.post(f"/api/runs/{failed[0]['id']}/retry")
+    assert r.status_code == 202
+    assert _wait(client, r.json()["id"])["status"] == "done"

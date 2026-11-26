@@ -32,9 +32,9 @@
     <fieldset>
       <legend>Модель</legend>
       <label class="field">Провайдер <select id="opt-provider"></select></label>
-      <label class="field">Ключ API для этой вкладки <input id="opt-key" type="password" autocomplete="off" placeholder="не нужен, если ключ есть в .env"></label>
+      <label class="field">Ключ доступа к модели (только для этой вкладки) <input id="opt-key" type="password" autocomplete="off" placeholder="не нужен, если ключ есть в .env"></label>
       <p id="key-status" class="muted small"></p>
-      <label class="field" id="base-url-field" hidden>Адрес сервера (OpenRouter, DeepSeek, Groq, vLLM, Ollama) <input id="opt-base-url" placeholder="https://openrouter.ai/api/v1"></label>
+      <label class="field" id="base-url-field" hidden>Адрес совместимого сервера <input id="opt-base-url" placeholder="https://openrouter.ai/api/v1"></label>
       <label class="field">Основная модель <input id="opt-model"></label>
       <label class="field">Запасные модели (через запятую) <input id="opt-fallbacks"></label>
     </fieldset>
@@ -47,7 +47,7 @@
       <label class="field">Требований за один запрос <input id="opt-batch" type="number" min="1" max="40"></label>
       <label class="field">Одновременных запросов к модели <input id="opt-parallel" type="number" min="1" max="16"></label>
       <label class="check"><input id="opt-redact" type="checkbox"> Маскировать чувствительные данные</label>
-      <label class="check"><input id="opt-ner" type="checkbox"> Искать ФИО (NER)</label>
+      <label class="check"><input id="opt-ner" type="checkbox"> Искать ФИО нейросетью</label>
       <label class="check"><input id="opt-cache" type="checkbox"> Брать готовые ответы из кэша</label>
     </fieldset>
     <p class="muted small">Ключ хранится только в памяти страницы и передаётся серверу при запуске проверки.</p>
@@ -79,7 +79,7 @@
         <div class="row">
           <label class="field inline">Пример <select id="sample-select"><option value="">(добавить пример)</option></select></label>
           <span class="muted">или</span>
-          <label class="field inline">Свои файлы <input id="file-input" type="file" multiple accept=".pdf,.docx,.md,.txt,.html,.htm"></label>
+          <label class="btn file-btn">Выбрать файлы<input id="file-input" type="file" multiple accept=".pdf,.docx,.md,.txt,.html,.htm" hidden></label>
         </div>
         <div id="doc-list"></div>
         <label class="check"><input id="opt-fix" type="checkbox"> Сформировать исправленную редакцию документа</label>
@@ -156,7 +156,7 @@
   </main>
 
   <footer class="footer">
-    <p><a href="#/check">Проверка</a> | <a href="#/history">История</a> | <a href="/docs" target="_blank" rel="noopener">Документация API</a></p>
+    <p><a href="#/check">Проверка</a> | <a href="#/history">История</a> | <a href="/docs" target="_blank" rel="noopener">Описание программного интерфейса</a></p>
     <p id="footer-standards"></p>
     <p id="status-version"></p>
   </footer>
