@@ -127,8 +127,12 @@ def run(
     grounder = Grounder(doc, masked)
     numbered = _numbered(masked)
 
-    audit = Path(cfg.runs_dir) / started.strftime("%Y%m%d-%H%M%S")
-    audit.mkdir(parents=True, exist_ok=True)
+    stamp = started.strftime("%Y%m%d-%H%M%S")
+    audit, n = Path(cfg.runs_dir) / stamp, 1
+    while audit.exists():  # два прогона в одну секунду (повтор из интерфейса) не должны затирать друг друга
+        n += 1
+        audit = Path(cfg.runs_dir) / f"{stamp}-{n}"
+    audit.mkdir(parents=True)
     res.audit_dir = audit
     (audit / "masked_input.md").write_text(masked, encoding="utf-8")
 
