@@ -387,3 +387,35 @@ body.with-assistant main { margin-right: 380px; }
   .card-title, .card-meta { grid-column: 1; }
   .segmented { flex-wrap: wrap; border-radius: 12px; }
 }
+
+/* ---------- тёмный фон: страница графитовая, карточки и таблицы остаются светлыми для чтения ---------- */
+:root {
+  --page: #232427;
+  --page-stripe: #26272a;
+  --page-line: #3b3c40;
+  --on-dark: #ecebe6;
+  --on-dark-muted: #a9aaa4;
+  --link-on-dark: #6fdcb2;
+}
+html { background: var(--page); }
+body { background: repeating-linear-gradient(var(--page) 0 2px, var(--page-stripe) 2px 4px); color: var(--on-dark); }
+.box, .card, .sheet, .assistant, table, .tabpanel { color: var(--ink); }
+.navbar { background: repeating-linear-gradient(#2c2d30 0 2px, #313236 2px 4px); border-bottom-color: #111; }
+.hero, .res-section > h2 { color: #f6f5f0; }
+.tagline, .res-section > p.muted, #findings-list > p.muted, .res-actions .muted { color: var(--on-dark-muted); }
+.res-actions a, .footer a { color: var(--link-on-dark); }
+.res-actions a:hover, .footer a:hover { color: #9be8c9; }
+.res-section .check, .res-section .row > label { color: var(--on-dark); }
+details.more { border-color: var(--page-line); }
+details.more > summary { color: var(--on-dark); }
+details.more > summary::before, details.more .count { color: var(--on-dark-muted); }
+details.more > div { color: var(--ink); }
+details.more > div > dl.kv { background: #fff; padding: 12px 14px; border-radius: 8px; }
+details.more > div > dl.kv dd { color: var(--ink); }
+.footer { color: var(--on-dark-muted); border-top-color: var(--page-line); }
+.empty { background: #fff; }
+.st { font: bold 12px var(--sans); }
+.st-done { color: var(--green-dk); }
+.st-error, .st-running { color: var(--red); }
+.st-cancelled { color: var(--orange); }
+.st-active { color: var(--green-dk); }

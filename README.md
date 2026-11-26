@@ -217,6 +217,7 @@ python -m validator ВХОД [ОТЧЁТ] [--answers FILE] [--fix] [--provider P
 | `VALIDATOR_PARALLEL` | одновременных запросов одной проверки | `6` |
 | `VALIDATOR_MAX_JOBS` | одновременных проверок в веб-интерфейсе | `3` |
 | `VALIDATOR_HEDGE_SECONDS` | через сколько секунд молчания модели повторить запрос параллельно (первый ответ побеждает; 0: выключено) | `90` |
+| `VALIDATOR_AUTO_RETRY`, `VALIDATOR_RETRY_PAUSE` | сколько раз проверка сама перезапускается после сбоя модели и пауза перед повтором, с | `2`, `45` |
 | `GEMINI_TEMPERATURE` | температура | значение модели |
 | `REDACT_ENABLED` | маскирование | `1` |
 | `REDACT_NER` | поиск ФИО через Natasha | `1` |

@@ -151,7 +151,7 @@ function renderDocs() {
     ["format", "Формат", (v) => esc(v.toUpperCase())],
     ["lines", "Строк", (v) => num(v)],
     ["chars", "Символов", (v) => num(v)],
-    ["id", "", (v) => `<button type="button" class="link" data-preview="${esc(v)}">Что уйдёт в модель</button> · <button type="button" class="link" data-remove="${esc(v)}">Убрать</button>`],
+    ["id", "", (v) => `<button type="button" class="link" data-preview="${esc(v)}">Что уйдёт в модель</button> / <button type="button" class="link" data-remove="${esc(v)}">Убрать</button>`],
   ], "doclist");
   el.querySelectorAll("[data-preview]").forEach((b) => { b.onclick = () => onPreview(b.dataset.preview); });
   el.querySelectorAll("[data-remove]").forEach((b) => { b.onclick = () => { state.docs = state.docs.filter((d) => d.id !== b.dataset.remove); renderDocs(); }; });
@@ -253,10 +253,11 @@ function renderJobs() {
     return `<div class="job ${esc(j.status)}">
       <div class="job-head">
         <b>${esc(j.document)}</b>
-        <span class="job-status">${esc(JOB_STATUS[j.status] || j.status)}${j.stop_requested && live ? " (останавливается)" : ""}${j.elapsed ? ` · ${fmtTime(j.elapsed)}` : ""}</span>
+        <span class="job-status">${esc(JOB_STATUS[j.status] || j.status)}${j.stop_requested && live ? " (останавливается)" : ""}${j.elapsed ? ` / ${fmtTime(j.elapsed)}` : ""}${j.attempt > 1 ? ` / попытка ${j.attempt}` : ""}</span>
         <span class="job-actions">
           ${live ? `<button type="button" class="btn small" data-stop="${esc(j.id)}" ${j.stop_requested ? "disabled" : ""}>Остановить</button>` : ""}
           ${j.status === "done" ? `<a class="btn small primary" href="#/result/${esc(j.run_id)}">Открыть результат</a>` : ""}
+          ${j.status === "error" || j.status === "cancelled" ? `<button type="button" class="btn small" data-jretry="${esc(j.id)}">Повторить</button>` : ""}
           <button type="button" class="link" data-log="${esc(j.id)}">${state.openLogs.has(j.id) ? "Скрыть журнал" : "Журнал"}</button>
         </span>
       </div>
@@ -266,6 +267,13 @@ function renderJobs() {
     </div>`;
   }).join("");
   document.querySelectorAll("[data-stop]").forEach((b) => { b.onclick = () => onStop(b.dataset.stop); });
+  document.querySelectorAll("[data-jretry]").forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try { await api.call("POST", `/api/jobs/${b.dataset.jretry}/retry`); } catch (e) { $("#preview").innerHTML = win("Не удалось повторить", `<p class="error">${esc(e.message)}</p>`); }
+      pollJobs();
+    };
+  });
   document.querySelectorAll("[data-log]").forEach((b) => {
     b.onclick = async () => {
       const id = b.dataset.log;
@@ -285,7 +293,7 @@ const SEV_ORDER = ["critical", "major", "minor"];
 const PAGE = 8;  // сколько нарушений показывать сразу
 const firstSentence = (s) => { const m = String(s || "").match(/^.+?[.!?](\s|$)/); return (m ? m[0] : String(s || "")).trim(); };
 // цитата документа: ячейки таблиц из PDF приходят с «|», показываем их через точку
-const quote = (a) => `<blockquote>${esc(a.text.replace(/\s*\|\s*/g, " · ").replace(/^[\s·]+|[\s·]+$/g, ""))}${a.where ? `<cite>${esc(a.where)}</cite>` : ""}</blockquote>`;
+const quote = (a) => `<blockquote>${esc(a.text.replace(/\s*\|\s*/g, " / ").replace(/^[\s/]+|[\s/]+$/g, ""))}${a.where ? `<cite>${esc(a.where)}</cite>` : ""}</blockquote>`;
 const sevTag = (sev) => `<span class="sev sev-${esc(sev)}">${esc(SEV[sev] || sev)}</span>`;
 
 async function showResult(runId) {
@@ -302,10 +310,10 @@ async function showResult(runId) {
   }
   const r = state.run;
   $("#res-title").textContent = r.document.title || r.document.name;
-  $("#res-meta").textContent = `${r.document.name} · проверка от ${new Date(r.started).toLocaleString("ru-RU")}`
-    + (r.elapsed ? ` · ${fmtTime(r.elapsed)}` : "") + ` · ${r.standards.map((x) => x.title).join(", ")}`;
-  const files = [["report", "отчёт"], ["questions", "вопросы"], ...(r.has_fixed ? [["fixed", "исправленная редакция"]] : []), ["result", "JSON"]];
-  $("#res-files").innerHTML = "Скачать: " + files.map(([k, l]) => `<a href="${api.fileUrl(r.id, k)}">${esc(l)}</a>`).join(" · ");
+  $("#res-meta").textContent = `${r.document.name} / проверка от ${new Date(r.started).toLocaleString("ru-RU")}`
+    + (r.elapsed ? ` / ${fmtTime(r.elapsed)}` : "") + ` / ${r.standards.map((x) => x.title).join(", ")}`;
+  const files = [["report", "отчёт"], ["questions", "вопросы"], ...(r.has_fixed ? [["fixed", "исправленная редакция"]] : []), ["result", "структурированный результат"]];
+  $("#res-files").innerHTML = "Скачать: " + files.map(([k, l]) => `<a href="${api.fileUrl(r.id, k)}">${esc(l)}</a>`).join(" / ");
   renderVerdict(r); renderSevFilter(r); renderFindings(r); renderQuestions(r); renderMore(r);
 }
 
@@ -362,7 +370,7 @@ function renderFindings(r) {
       <summary>
         ${sevTag(f.severity)}
         <span class="card-title">${esc(firstSentence(f.problem))}</span>
-        <span class="card-meta">${esc(f.id)}${f.req_ids.length ? " · " + esc(f.req_ids.join(", ")) : ""}${where ? " · " + esc(where) : ""}${f.status !== "open" ? " · " + esc(STATUS[f.status]) : ""}</span>
+        <span class="card-meta">${esc(f.id)}${f.req_ids.length ? " / " + esc(f.req_ids.join(", ")) : ""}${where ? " / " + esc(where) : ""}${f.status !== "open" ? " / " + esc(STATUS[f.status]) : ""}</span>
       </summary>
       <div class="card-body">
         ${f.anchors.slice(0, 2).map(quote).join("")}
@@ -405,7 +413,7 @@ function renderQuestions(r) {
       <summary>
         <span class="tag ${q.priority === "blocking" ? "tag-strong" : ""}">${esc(q.priority_label)}</span>
         <span class="card-title">${esc(q.question)}</span>
-        <span class="card-meta">${esc(q.addressee)}${answered ? " · отвечено" : ""}</span>
+        <span class="card-meta">${esc(q.addressee)}${answered ? " / отвечено" : ""}</span>
       </summary>
       <div class="card-body">
         ${q.quote ? quote({ text: q.quote.slice(0, 300), where: "" }) : ""}
@@ -462,7 +470,7 @@ function renderMore(r) {
   $("#more-passport").innerHTML = `<dl class="kv">
       <dt>Документ</dt><dd>${esc(r.document.name)}, SHA-256 ${esc(r.document.sha256.slice(0, 16))}…</dd>
       <dt>Стандарты</dt><dd>${esc(r.standards.map((x) => x.title).join(", "))}</dd>
-      <dt>Модель</dt><dd>${esc(p.provider)}, ${esc(p.model)}; запросов ${p.calls}, из кэша ${p.cached}</dd>
+      <dt>Модель</dt><dd>${esc(settings.providerInfo(p.provider)?.title || p.provider)}, ${esc(p.model)}; запросов ${p.calls}, из кэша ${p.cached}</dd>
       <dt>Агент</dt><dd>${esc(r.agent_version)}</dd>
       <dt>Маскирование</dt><dd>${m.length ? esc(m.map(([k, v]) => `${k}: ${v}`).join(", ")) : "чувствительных данных не найдено"}</dd>
     </dl>` + p.warnings.map((w) => `<p class="error">${esc(w)}</p>`).join("");
@@ -531,18 +539,34 @@ const assistant = {
 
 // ---------- страница «История» ----------
 
-const runLabel = (r) => `${new Date(r.started).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" })} · ${r.document}`;
+const runLabel = (r) => `${new Date(r.started).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" })} / ${r.document}`;
 
 async function showHistory() {
   const el = $("#history-table");
   el.textContent = "Загружаю…";
   try {
-    const runs = await api.runs();
+    const runs = await api.call("GET", "/api/runs?all=true");
+    const when = (v) => (v ? new Date(v).toLocaleString("ru-RU") : "");
     el.innerHTML = table(runs, [
-      ["started", "Проверка", (v, r) => `<a href="#/result/${esc(r.id)}">${esc(new Date(v).toLocaleString("ru-RU"))}</a>`],
-      ["document", "Документ"], ["requirements", "Требований"], ["open_findings", "Открытых нарушений"], ["critical", "Критичных"],
-      ["answered", "С ответами", (v) => (v ? "да" : "")], ["development", "Разработка"],
+      ["started", "Проверка", (v, r) => (r.can_open ? `<a href="#/result/${esc(r.id)}">${esc(when(v))}</a>` : esc(when(v)))],
+      ["document", "Документ"],
+      ["status_label", "Статус", (v, r) => `<span class="st st-${esc(r.status)}">${esc(v)}</span>`
+        + (r.error ? `<br><span class="muted small">${esc(r.error.slice(0, 160))}</span>` : "")],
+      ["open_findings", "Нарушений", (v, r) => (r.can_open ? `${v} (критичных ${r.critical})` : "")],
+      ["development", "", (v, r) => (r.can_retry
+        ? `<button type="button" class="btn small" data-retry="${esc(r.id)}">Повторить</button>`
+        : esc(v || ""))],
     ]);
+    el.querySelectorAll("[data-retry]").forEach((b) => {
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          await api.call("POST", `/api/runs/${encodeURIComponent(b.dataset.retry)}/retry`);
+          location.hash = "#/check";
+          pollJobs();
+        } catch (e) { showError(el, e); }
+      };
+    });
   } catch (e) { showError(el, e); }
 }
 
