@@ -18,6 +18,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -295,6 +296,7 @@ class LLMClient:
         cache_dir: Path | None = None,
         should_stop: Callable[[], bool] | None = None,
         max_retries: int = 6,
+        hedge_after: float | None = None,
     ):
         self.backend = backend
         self.model = model
@@ -311,6 +313,9 @@ class LLMClient:
         self.usage = Usage()
         self.log = log
         self.should_stop = should_stop
+        # хедж: если ответа нет дольше hedge_after секунд, тот же запрос уходит второй раз, берётся первый ответ.
+        # У бесплатных моделей время ответа скачет от 40 с до нескольких минут, хедж срезает такие хвосты.
+        self.hedge_after = float(os.getenv("VALIDATOR_HEDGE_SECONDS", "90")) if hedge_after is None else hedge_after
         self._lock = threading.Lock()
         if audit_dir:
             audit_dir.mkdir(parents=True, exist_ok=True)
@@ -369,7 +374,7 @@ class LLMClient:
                     self.check_stop()
                     t0 = time.time()
                     try:
-                        reply = self.backend.call(model, system, prompt, schema)
+                        reply = self._call(name, model, system, prompt, schema)
                     except ProviderError as e:
                         last_err = e
                         if e.kind in ("quota", "notfound"):
@@ -417,6 +422,32 @@ class LLMClient:
                 self.log(f"    все модели цепочки перегружены, пауза {wait} с (круг {rnd + 1}/{self.rounds})")
                 self._sleep(wait)
         raise LLMError(f"Шаг {name}: ни одна модель не ответила. Повторите проверку позже, готовые шаги возьмутся из кэша. {last_err}")
+
+    def _call(self, name: str, model: str, system: str, prompt: str, schema) -> Reply:
+        """Вызов провайдера с хеджем и проверкой остановки во время ожидания."""
+        pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="call")
+        try:
+            first = pool.submit(self.backend.call, model, system, prompt, schema)
+            futures = {first}
+            started, hedged = time.time(), False
+            errors: list[BaseException] = []
+            while futures:
+                self.check_stop()
+                done, futures = wait(futures, timeout=0.5, return_when=FIRST_COMPLETED)
+                for f in done:
+                    try:
+                        return f.result()
+                    except Exception as e:  # noqa: BLE001  ждём второй запрос, если он есть
+                        errors.append(e)
+                if not hedged and futures and self.hedge_after and time.time() - started > self.hedge_after:
+                    hedged = True
+                    with self._lock:
+                        self.usage.calls += 1
+                    self.log(f"    {name}: {model} молчит дольше {self.hedge_after:.0f} с, отправляю повторный запрос параллельно")
+                    futures.add(pool.submit(self.backend.call, model, system, prompt, schema))
+            raise errors[0]
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     # ---- кэш ----
 

@@ -101,3 +101,22 @@ def test_parallel_calls_are_counted_safely(monkeypatch):
     for t in threads:
         t.join()
     assert c.usage.calls == 20 and len(c.usage.steps) == 20
+
+
+def test_hedge_takes_first_answer(monkeypatch):
+    """Первый запрос завис: через hedge_after уходит повторный, его ответ и принимается."""
+    import time as _t
+
+    class Hanging(ScriptBackend):
+        def call(self, model, system, prompt, schema):
+            with self._lock:
+                self.calls.append(model)
+                first = len(self.calls) == 1
+            if first:
+                _t.sleep(3)
+            return Reply(None, OK, model + ("-slow" if first else "-hedge"))
+
+    c = LLMClient(Hanging({"m": []}), "m", Redactor(use_ner=False), log=lambda *_: None, hedge_after=0.3)
+    t0 = _t.time()
+    c.generate("x", "sys", "p", SetVerdict)
+    assert _t.time() - t0 < 2 and c.usage.steps[-1] == ("x", "m-hedge") and c.usage.calls == 2
