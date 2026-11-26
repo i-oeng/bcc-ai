@@ -9,6 +9,7 @@ X-Gemini-Key (только для запуска прогона, на диск �
 
 from __future__ import annotations
 
+import mimetypes
 from pathlib import Path
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
@@ -22,11 +23,21 @@ from . import services
 from .jobs import Busy, JobRegistry
 
 STATIC = Path(__file__).resolve().parent / "static"
+mimetypes.add_type("font/woff2", ".woff2")  # в реестре Windows его может не быть
 MAX_UPLOAD = 20 * 1024 * 1024
 
 app = FastAPI(title="Агент проверки требований", version=__version__,
               description="Статическая проверка требований по ISO/IEC/IEEE 29148 и IEEE 830")
 REGISTRY = JobRegistry()
+
+
+@app.middleware("http")
+async def fonts_cors(request, call_next):
+    """Отчёт показывается в iframe с sandbox (чужой origin), а шрифты браузер грузит туда только с CORS."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/fonts/"):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
 
 
 # ---------- схемы запросов ----------

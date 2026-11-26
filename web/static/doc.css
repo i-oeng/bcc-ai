@@ -1,24 +1,24 @@
-/* Документ и отчёт внутри iframe: тот же Y2K-стиль, но спокойнее, для чтения. */
-body { margin: 0; padding: 22px 30px 40px; font: 13px/1.65 Verdana, Tahoma, "Segoe UI", sans-serif; color: #1c1c1e; max-width: 980px; background: #fff; }
-h1 { font: bold 22px/1.3 "Trebuchet MS", Tahoma, sans-serif; margin: 0 0 14px; padding-bottom: 8px; border-bottom: 3px double #00ab75; }
-h2 { font: bold 17px/1.3 "Trebuchet MS", Tahoma, sans-serif; margin: 30px 0 10px; padding: 4px 10px; color: #fff; background: linear-gradient(90deg, #006b49, #00ab75 70%, #35c793); }
-h3 { font: bold 14px/1.3 "Trebuchet MS", Tahoma, sans-serif; margin: 22px 0 8px; color: #006b49; }
-h3::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 8px; background: #dca86e; vertical-align: 1px; }
-h4, h5, h6 { font-size: 13px; margin: 16px 0 6px; color: #47484c; }
-p { margin: 7px 0; }
-ul, ol { padding-left: 24px; }
+/* Документ и отчёт внутри iframe: в стиле интерфейса (Apple 2001, Garamond, акценты BCC). */
+@import url("fonts/fonts.css");
+body { margin: 0; padding: 26px 34px 44px; max-width: 900px; font: 17px/1.5 "ITC Garamond Std", "ITC Garamond", "Apple Garamond", "EB Garamond", Garamond, Georgia, serif; color: #111; background: #fff; }
+h1 { margin: 0 0 16px; font-weight: 400; font-size: 44px; line-height: 1.05; letter-spacing: -.035em; }
+h2 { margin: 34px 0 10px; padding-bottom: 4px; font-weight: 400; font-size: 30px; line-height: 1.15; letter-spacing: -.02em; border-bottom: 1px solid #d9d9d9; }
+h3 { margin: 24px 0 8px; font-weight: 400; font-size: 23px; letter-spacing: -.015em; }
+h4, h5, h6 { margin: 18px 0 6px; font-size: 18px; font-weight: 600; }
+p { margin: 8px 0; }
+ul, ol { padding-left: 26px; }
 li { margin: 3px 0; }
-table { border-collapse: collapse; width: 100%; margin: 10px 0 14px; font-size: 12px; border: 1px solid #7a7c85; }
-th, td { border: 1px solid #d3d5db; padding: 5px 8px; text-align: left; vertical-align: top; }
-th { background: linear-gradient(#fafafb, #e3e4e9); font-weight: bold; border-bottom-color: #7a7c85; }
-tr:nth-child(even) td { background: #f7fbf9; }
-code { font: 12px "Lucida Console", "Courier New", monospace; background: #f0f9f5; border: 1px solid #d2eee5; padding: 0 4px; }
-pre { background: #f6f7f9; border: 1px solid #b9bbc3; padding: 10px 12px; overflow: auto; }
-pre code { background: none; border: none; padding: 0; }
-blockquote { margin: 10px 0; padding: 6px 14px; border-left: 4px solid #dca86e; background: #fcf8f2; color: #47484c; }
-hr { border: none; border-top: 1px dotted #b9bbc3; margin: 22px 0; }
-details { border: 1px solid #b9bbc3; padding: 6px 12px; margin: 8px 0; background: #fdfdfe; }
-details[open] { border-left: 4px solid #00ab75; }
-summary { cursor: pointer; font-weight: bold; color: #008d60; }
-mark.ph { background: #f6e9d9; border: 1px solid #dca86e; padding: 0 3px; font: 11px "Lucida Console", "Courier New", monospace; color: #6b4a1f; }
+strong, b { font-weight: 600; }
+table { width: 100%; margin: 10px 0 16px; border-collapse: separate; border-spacing: 0; font-size: 15.5px; line-height: 1.35; border: 1px solid #a6a6a6; border-radius: 6px; overflow: hidden; }
+th, td { padding: 6px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid #e4e4e4; }
+th { font: bold 11px/1.3 "Lucida Grande", Geneva, Verdana, sans-serif; color: #333; background: repeating-linear-gradient(#fff 0 2px, #efefef 2px 4px); border-bottom-color: #a6a6a6; }
+tr:last-child td { border-bottom: none; }
+code { font: 13px Monaco, "Lucida Console", monospace; background: #f4f4f4; padding: 0 4px; border-radius: 3px; }
+pre { background: #fafafa; border: 1px solid #d9d9d9; border-radius: 6px; padding: 10px 12px; overflow: auto; }
+pre code { background: none; padding: 0; }
+blockquote { margin: 12px 0; padding: 2px 16px; border-left: 3px solid #dca86e; color: #555; font-style: italic; }
+hr { border: none; border-top: 1px solid #d9d9d9; margin: 26px 0; }
+details { border: 1px solid #d9d9d9; border-radius: 8px; padding: 6px 14px; margin: 8px 0; }
+summary { cursor: pointer; color: #008d60; }
+mark.ph { background: #f6ecdf; border: 1px solid #dca86e; border-radius: 4px; padding: 0 4px; font: 12px Monaco, "Lucida Console", monospace; color: #6b4a1f; }
 a { color: #008d60; }

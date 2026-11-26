@@ -85,8 +85,8 @@ function table(rows, cols) {
 
 // items: [подпись, значение, необязательный класс critical|major|minor]
 const cards = (items) => `<div class="cards">${items.map(([label, value, cls]) => `<div class="card ${cls || ""}"><b>${esc(value)}</b>${esc(label)}</div>`).join("")}</div>`;
-// окно в стиле интерфейса: заголовок и содержимое
-const win = (title, body) => `<div class="window"><div class="titlebar"><span>${esc(title)}</span><i class="tb-dots" aria-hidden="true"></i></div><div class="window-body">${body}</div></div>`;
+// блок страницы: заголовок и содержимое
+const win = (title, body) => `<div class="box"><h2>${esc(title)}</h2>${body}</div>`;
 const setStatus = (text, busy) => { const c = $("#job-indicator"); c.textContent = text; c.classList.toggle("busy", !!busy); };
 // HTML документа или отчёта показываем только в iframe с sandbox (без скриптов), со своими стилями
 const docPage = (html) => `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="${location.origin}/static/doc.css"><body>${html}</body>`;
@@ -361,7 +361,7 @@ async function init() {
   if (!st.has_env_key) $("#settings").hidden = false;
   $("#status-key").textContent = st.has_env_key ? "Ключ: .env" : "Ключ: не задан";
   $("#status-model").textContent = `Модель: ${st.defaults.model}`;
-  $("#status-version").textContent = `v${st.version}`;
+  $("#status-version").textContent = `Версия ${st.version}.`;
   $("#opt-model").oninput = (e) => { $("#status-model").textContent = `Модель: ${e.target.value.trim() || st.defaults.model}`; };
   $("#opt-key").addEventListener("input", (e) => { $("#status-key").textContent = e.target.value.trim() ? "Ключ: из настроек" : (st.has_env_key ? "Ключ: .env" : "Ключ: не задан"); });
   $("#sample-select").innerHTML += (await api.samples()).map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");

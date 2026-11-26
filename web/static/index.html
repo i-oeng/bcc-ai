@@ -4,67 +4,64 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Агент проверки требований</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 fill=%22%2300AB75%22/%3E%3Crect x=%224%22 y=%224%22 width=%228%22 height=%228%22 fill=%22%23DCA86E%22/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%223%22 fill=%22%2300AB75%22/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="static/fonts/fonts.css">
   <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
   <!-- Вся работа с данными в app.js через /api (схемы: /docs). Оформление в style.css. -->
-  <header class="appbar">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true"></span>
-      <span class="brand-name">Агент проверки требований</span>
-      <span class="brand-tag">ISO/IEC/IEEE 29148 · IEEE 830</span>
-    </div>
-    <nav class="mainnav">
+  <header class="navbar">
+    <nav class="toptabs">
       <a href="#/check" data-route="check">Проверка</a>
       <a href="#/result" data-route="result">Результат</a>
       <a href="#/history" data-route="history">История</a>
       <a href="#/compare" data-route="compare">До и после</a>
+      <button id="settings-toggle" type="button">Настройки</button>
     </nav>
-    <button id="settings-toggle" type="button" class="btn">Настройки</button>
   </header>
 
-  <aside id="settings" class="window floating" hidden>
-    <div class="titlebar"><span>Настройки</span><button type="button" class="tb-close" id="settings-close" aria-label="Закрыть">×</button></div>
-    <div class="window-body">
-      <fieldset>
-        <legend>Прогон</legend>
-        <label class="field">Основная модель <input id="opt-model"></label>
-        <label class="field">Запасные модели (через запятую) <input id="opt-fallbacks"></label>
-        <label class="field">Требований за запрос <input id="opt-batch" type="number" min="1" max="40"></label>
-        <label class="check"><input id="opt-redact" type="checkbox"> Маскировать чувствительные данные</label>
-        <label class="check"><input id="opt-ner" type="checkbox"> Искать ФИО (NER)</label>
-        <label class="check"><input id="opt-cache" type="checkbox"> Брать готовые ответы из кэша</label>
-      </fieldset>
-      <fieldset>
-        <legend>Ключ Gemini API</legend>
-        <p id="key-status" class="muted"></p>
-        <label class="field">Ключ для этой вкладки <input id="opt-key" type="password" autocomplete="off"></label>
-        <p class="muted small">Хранится только в памяти страницы. Получить: aistudio.google.com/apikey</p>
-      </fieldset>
-    </div>
+  <div class="newsbar">
+    <span class="news-label">Состояние</span>
+    <span id="job-indicator" class="news-text">Готово</span>
+    <span id="status-model" class="news-meta"></span>
+    <span id="status-key" class="news-meta"></span>
+  </div>
+
+  <aside id="settings" class="sheet" hidden>
+    <div class="sheet-head"><h2>Настройки</h2><button type="button" class="sheet-close" id="settings-close" aria-label="Закрыть">×</button></div>
+    <fieldset>
+      <legend>Прогон</legend>
+      <label class="field">Основная модель <input id="opt-model"></label>
+      <label class="field">Запасные модели (через запятую) <input id="opt-fallbacks"></label>
+      <label class="field">Требований за запрос <input id="opt-batch" type="number" min="1" max="40"></label>
+      <label class="check"><input id="opt-redact" type="checkbox"> Маскировать чувствительные данные</label>
+      <label class="check"><input id="opt-ner" type="checkbox"> Искать ФИО (NER)</label>
+      <label class="check"><input id="opt-cache" type="checkbox"> Брать готовые ответы из кэша</label>
+    </fieldset>
+    <fieldset>
+      <legend>Ключ Gemini API</legend>
+      <p id="key-status" class="muted"></p>
+      <label class="field">Ключ для этой вкладки <input id="opt-key" type="password" autocomplete="off"></label>
+      <p class="muted small">Хранится только в памяти страницы. Получить: aistudio.google.com/apikey</p>
+    </fieldset>
   </aside>
 
   <main>
     <section id="view-check" class="view">
-      <div class="window">
-        <div class="titlebar"><span>Проверка документа</span><i class="tb-dots" aria-hidden="true"></i></div>
-        <div class="window-body">
-          <p class="lead">Статическая проверка требований по ISO/IEC/IEEE 29148 (5.2.5, 5.2.6) и IEEE 830 (4.3). Каждое нарушение привязано к месту в документе.</p>
-          <fieldset>
-            <legend>Документ</legend>
-            <div class="row">
-              <label class="field inline">Пример <select id="sample-select"><option value="">(выберите)</option></select></label>
-              <span class="muted">или</span>
-              <label class="field inline">Свой файл <input id="file-input" type="file" accept=".pdf,.docx,.md,.txt,.html,.htm"></label>
-            </div>
-            <div id="doc-info"></div>
-          </fieldset>
-          <label class="check"><input id="opt-fix" type="checkbox"> Сформировать исправленную редакцию документа</label>
-          <div class="row actions">
-            <button id="btn-preview" type="button" class="btn" disabled>Что уйдёт в модель</button>
-            <button id="btn-run" type="button" class="btn primary" disabled>Запустить проверку</button>
-          </div>
+      <h1 class="hero">Проверка требований.</h1>
+      <p class="tagline">Агент находит противоречия, пробелы и непроверяемые формулировки и привязывает каждое нарушение к строке документа.</p>
+      <div class="box">
+        <h2>Документ</h2>
+        <div class="row">
+          <label class="field inline">Пример <select id="sample-select"><option value="">(выберите)</option></select></label>
+          <span class="muted">или</span>
+          <label class="field inline">Свой файл <input id="file-input" type="file" accept=".pdf,.docx,.md,.txt,.html,.htm"></label>
+        </div>
+        <div id="doc-info"></div>
+        <label class="check"><input id="opt-fix" type="checkbox"> Сформировать исправленную редакцию документа</label>
+        <div class="row actions">
+          <button id="btn-preview" type="button" class="btn" disabled>Что уйдёт в модель</button>
+          <button id="btn-run" type="button" class="btn primary" disabled>Запустить проверку</button>
         </div>
       </div>
       <div id="preview"></div>
@@ -72,73 +69,63 @@
     </section>
 
     <section id="view-result" class="view" hidden>
-      <div class="window">
-        <div class="titlebar"><span>Результат проверки</span><i class="tb-dots" aria-hidden="true"></i></div>
-        <div class="window-body">
-          <h1 id="res-title">Результат</h1>
-          <p id="res-meta" class="muted small"></p>
-          <div id="res-empty" class="empty">Результата пока нет: запустите проверку или откройте прогон в «Истории».</div>
-          <div id="res-body" hidden>
-            <nav class="tabs" id="res-tabs">
-              <button data-tab="overview" class="active">Кратко</button>
-              <button data-tab="report">Отчёт</button>
-              <button data-tab="findings">Нарушения</button>
-              <button data-tab="requirements">Требования</button>
-              <button data-tab="questions">Вопросы</button>
-              <button data-tab="checklist">Чек-лист и покрытие</button>
-              <button data-tab="passport">Паспорт</button>
-              <button data-tab="files">Файлы</button>
-            </nav>
-            <div class="tabpanel">
-              <div id="tab-overview" class="tab"></div>
-              <div id="tab-report" class="tab" hidden><iframe id="report-frame" class="docframe" sandbox title="Отчёт"></iframe></div>
-              <div id="tab-findings" class="tab" hidden>
-                <div class="row toolbar">
-                  <select id="f-sev"><option value="">Любая серьёзность</option><option value="critical">Критично</option><option value="major">Существенно</option><option value="minor">Незначительно</option></select>
-                  <select id="f-status"><option value="">Любой статус</option><option value="open">Открыто</option><option value="closed">Закрыто ответом</option><option value="changed">Изменено ответом</option></select>
-                  <input id="f-text" placeholder="Поиск">
-                </div>
-                <div id="findings-table"></div>
-              </div>
-              <div id="tab-requirements" class="tab" hidden></div>
-              <div id="tab-questions" class="tab" hidden></div>
-              <div id="tab-checklist" class="tab" hidden></div>
-              <div id="tab-passport" class="tab" hidden></div>
-              <div id="tab-files" class="tab" hidden></div>
+      <h1 class="hero" id="res-title">Результат.</h1>
+      <p id="res-meta" class="tagline"></p>
+      <div id="res-empty" class="box empty">Результата пока нет: запустите проверку или откройте прогон в «Истории».</div>
+      <div id="res-body" hidden>
+        <nav class="tabs" id="res-tabs">
+          <button data-tab="overview" class="active">Кратко</button>
+          <button data-tab="report">Отчёт</button>
+          <button data-tab="findings">Нарушения</button>
+          <button data-tab="requirements">Требования</button>
+          <button data-tab="questions">Вопросы</button>
+          <button data-tab="checklist">Чек-лист и покрытие</button>
+          <button data-tab="passport">Паспорт</button>
+          <button data-tab="files">Файлы</button>
+        </nav>
+        <div class="tabpanel">
+          <div id="tab-overview" class="tab"></div>
+          <div id="tab-report" class="tab" hidden><iframe id="report-frame" class="docframe" sandbox title="Отчёт"></iframe></div>
+          <div id="tab-findings" class="tab" hidden>
+            <div class="row toolbar">
+              <select id="f-sev"><option value="">Любая серьёзность</option><option value="critical">Критично</option><option value="major">Существенно</option><option value="minor">Незначительно</option></select>
+              <select id="f-status"><option value="">Любой статус</option><option value="open">Открыто</option><option value="closed">Закрыто ответом</option><option value="changed">Изменено ответом</option></select>
+              <input id="f-text" placeholder="Поиск">
             </div>
+            <div id="findings-table"></div>
           </div>
+          <div id="tab-requirements" class="tab" hidden></div>
+          <div id="tab-questions" class="tab" hidden></div>
+          <div id="tab-checklist" class="tab" hidden></div>
+          <div id="tab-passport" class="tab" hidden></div>
+          <div id="tab-files" class="tab" hidden></div>
         </div>
       </div>
     </section>
 
     <section id="view-history" class="view" hidden>
-      <div class="window">
-        <div class="titlebar"><span>История прогонов</span><i class="tb-dots" aria-hidden="true"></i></div>
-        <div class="window-body"><div id="history-table"></div></div>
-      </div>
+      <h1 class="hero">История.</h1>
+      <p class="tagline">Прошлые прогоны открываются без новых запросов к модели.</p>
+      <div class="box"><div id="history-table"></div></div>
     </section>
 
     <section id="view-compare" class="view" hidden>
-      <div class="window">
-        <div class="titlebar"><span>До и после</span><i class="tb-dots" aria-hidden="true"></i></div>
-        <div class="window-body">
-          <p class="lead">Сравнение двух прогонов: обычно исходный документ и его исправленная редакция.</p>
-          <div class="row">
-            <label class="field inline">До <select id="cmp-before"></select></label>
-            <label class="field inline">После <select id="cmp-after"></select></label>
-            <button id="btn-compare" type="button" class="btn primary">Сравнить</button>
-          </div>
-          <div id="compare-out"></div>
+      <h1 class="hero">До и после.</h1>
+      <p class="tagline">Сравнение двух прогонов: исходный документ и его исправленная редакция.</p>
+      <div class="box">
+        <div class="row">
+          <label class="field inline">До <select id="cmp-before"></select></label>
+          <label class="field inline">После <select id="cmp-after"></select></label>
+          <button id="btn-compare" type="button" class="btn primary">Сравнить</button>
         </div>
+        <div id="compare-out"></div>
       </div>
     </section>
   </main>
 
-  <footer class="statusbar">
-    <span id="job-indicator" class="cell grow">Готово</span>
-    <span id="status-key" class="cell"></span>
-    <span id="status-model" class="cell"></span>
-    <span id="status-version" class="cell"></span>
+  <footer class="footer">
+    <p><a href="#/check">Проверка</a> | <a href="#/history">История</a> | <a href="/docs" target="_blank" rel="noopener">Документация API</a></p>
+    <p>Проверка по ISO/IEC/IEEE 29148 и IEEE 830. <span id="status-version"></span></p>
   </footer>
 
   <script src="static/app.js"></script>
