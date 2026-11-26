@@ -213,7 +213,11 @@ def report_html(res) -> str:
 def run_view(res) -> dict:
     """Всё, что нужно странице результата, одним JSON. Замаскированные значения возвращены на место."""
     r = report.Renderer(res)
-    t = r.t
+
+    def t(text: str, model: bool = True) -> str:
+        """Текст для экрана: значения возвращены на место, разметка Markdown (** и `) убрана."""
+        return re.sub(r"\*\*|`", "", r.t(text, model))
+
     op = res.open_findings()
     sev = Counter(f.severity for f in op)
     per_req = Counter(rid for f in op if f.scope == "requirement" for rid in f.req_ids)

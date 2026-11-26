@@ -83,7 +83,11 @@ function table(rows, cols) {
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
-const cards = (items) => `<div class="cards">${items.map(([label, value]) => `<div class="card"><b>${esc(value)}</b>${esc(label)}</div>`).join("")}</div>`;
+// items: [подпись, значение, необязательный класс critical|major|minor]
+const cards = (items) => `<div class="cards">${items.map(([label, value, cls]) => `<div class="card ${cls || ""}"><b>${esc(value)}</b>${esc(label)}</div>`).join("")}</div>`;
+// окно в стиле интерфейса: заголовок и содержимое
+const win = (title, body) => `<div class="window"><div class="titlebar"><span>${esc(title)}</span><i class="tb-dots" aria-hidden="true"></i></div><div class="window-body">${body}</div></div>`;
+const setStatus = (text, busy) => { const c = $("#job-indicator"); c.textContent = text; c.classList.toggle("busy", !!busy); };
 // HTML документа или отчёта показываем только в iframe с sandbox (без скриптов), со своими стилями
 const docPage = (html) => `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="${location.origin}/static/doc.css"><body>${html}</body>`;
 const showError = (el, e) => { el.innerHTML = `<p class="error">${esc(e.message || e)}</p>`; };
@@ -117,33 +121,33 @@ async function onFile() {
 
 async function onPreview() {
   const out = $("#preview");
-  out.textContent = "Маскирую локально, в модель ничего не уходит…";
+  out.innerHTML = win("Что уйдёт в модель", `<p class="muted">Маскирую локально, в модель ничего не уходит…</p>`);
   try {
     const p = await api.preview(state.documentId, settings.read());
-    out.innerHTML = (p.replacements.length
+    out.innerHTML = win("Что уйдёт в модель", (p.replacements.length
       ? `<p class="ok">Замаскировано значений: ${p.replacements.length}</p>` + table(p.replacements, [["placeholder", "Метка"], ["kind", "Тип"], ["value", "Исходное (частично)"]])
       : `<p>Чувствительных данных не найдено${p.enabled ? "" : " (маскирование выключено)"}</p>`)
       + `<h3>Документ, который увидит модель</h3>
          <p class="muted">Подсвечены замаскированные значения. <label><input type="checkbox" id="raw-toggle"> исходный текст</label></p>
          <iframe id="masked-frame" class="docframe" sandbox title="Маскированный документ"></iframe>
-         <pre class="masked" id="masked-raw" hidden>${esc(p.masked)}</pre>`;
+         <pre class="masked" id="masked-raw" hidden>${esc(p.masked)}</pre>`);
     $("#masked-frame").srcdoc = docPage(p.masked_html);
     $("#raw-toggle").onchange = (e) => { $("#masked-frame").hidden = e.target.checked; $("#masked-raw").hidden = !e.target.checked; };
-  } catch (e) { showError(out, e); }
+  } catch (e) { out.innerHTML = win("Что уйдёт в модель", `<p class="error">${esc(e.message || e)}</p>`); }
 }
 
 async function onRun() {
   try {
     const j = await api.startJob(state.documentId, settings.read());
     trackJob(j.id);
-  } catch (e) { showError($("#job"), e); }
+  } catch (e) { $("#job").innerHTML = win("Ход проверки", `<p class="error">${esc(e.message || e)}</p>`); }
 }
 
 function trackJob(id) {
   state.jobId = id;
   state.logFrom = 0;
   $("#btn-run").disabled = true;
-  $("#job").innerHTML = `<p id="job-status"></p><pre class="log" id="job-log"></pre>`;
+  $("#job").innerHTML = win("Ход проверки", `<p id="job-status">Запускаю…</p><div class="progress" id="job-progress"><span></span></div><pre class="log" id="job-log"></pre>`);
   pollJob();
 }
 
@@ -155,7 +159,10 @@ async function pollJob() {
   const log = $("#job-log");
   if (log && j.log.length) { log.textContent += j.log.join("\n") + "\n"; log.scrollTop = log.scrollHeight; }
   const st = $("#job-status");
-  $("#job-indicator").textContent = j.status === "running" ? `идёт проверка ${j.document}, ${Math.round(j.elapsed)} с` : "";
+  const bar = $("#job-progress");
+  if (j.status === "running") setStatus(`Идёт проверка: ${j.document}, ${Math.round(j.elapsed)} с`, true);
+  else setStatus(j.status === "done" ? `Готово: ${j.document}` : "Прогон остановился");
+  if (bar) bar.className = "progress" + (j.status === "done" ? " done" : j.status === "error" ? " failed" : "");
   if (j.status === "running") {
     if (st) st.textContent = `Проверка «${j.document}» идёт ${Math.round(j.elapsed)} с`;
     setTimeout(pollJob, 1500);
@@ -193,8 +200,8 @@ async function showResult(runId) {
 
 function renderOverview(r) {
   const s = r.summary, d = r.decision;
-  $("#tab-overview").innerHTML = cards([["требований", s.requirements], ["открытых нарушений", s.open], ["критичных", s.critical],
-    ["существенных", s.major], ["незначительных", s.minor], ["вопросов", s.questions], ...(s.closed ? [["закрыто ответами", s.closed]] : [])])
+  $("#tab-overview").innerHTML = cards([["требований", s.requirements], ["открытых нарушений", s.open], ["критичных", s.critical, "critical"],
+    ["существенных", s.major, "major"], ["незначительных", s.minor, "minor"], ["вопросов", s.questions], ...(s.closed ? [["закрыто ответами", s.closed]] : [])])
     + `<p><b>Разработка:</b> ${esc(d.development)}<br><span class="muted">${esc(d.development_rationale)}</span></p>`
     + `<p><b>Тестирование:</b> ${esc(d.testing)}<br><span class="muted">${esc(d.testing_rationale)}</span></p>`
     + `<p>${esc(d.overall)}</p>`
@@ -337,6 +344,7 @@ function route() {
 
 async function init() {
   $("#settings-toggle").onclick = () => { $("#settings").hidden = !$("#settings").hidden; };
+  $("#settings-close").onclick = () => { $("#settings").hidden = true; };
   $("#opt-key").oninput = (e) => { state.apiKey = e.target.value.trim(); };
   $("#sample-select").onchange = onSample;
   $("#file-input").onchange = onFile;
@@ -351,6 +359,11 @@ async function init() {
   settings.load(st.defaults);
   $("#key-status").textContent = st.has_env_key ? "Ключ найден в .env" : "В .env нет GEMINI_API_KEY: впишите ключ ниже";
   if (!st.has_env_key) $("#settings").hidden = false;
+  $("#status-key").textContent = st.has_env_key ? "Ключ: .env" : "Ключ: не задан";
+  $("#status-model").textContent = `Модель: ${st.defaults.model}`;
+  $("#status-version").textContent = `v${st.version}`;
+  $("#opt-model").oninput = (e) => { $("#status-model").textContent = `Модель: ${e.target.value.trim() || st.defaults.model}`; };
+  $("#opt-key").addEventListener("input", (e) => { $("#status-key").textContent = e.target.value.trim() ? "Ключ: из настроек" : (st.has_env_key ? "Ключ: .env" : "Ключ: не задан"); });
   $("#sample-select").innerHTML += (await api.samples()).map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
   if (st.running_job) trackJob(st.running_job);  // после перезагрузки страницы продолжаем следить за прогоном
   route();
