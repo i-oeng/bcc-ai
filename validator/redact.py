@@ -183,6 +183,8 @@ class Redactor:
             self.use_ner = False
             return []
         out: list[Detection] = []
+        # слова, которые в тексте встречаются со строчной буквы: это не имена («кешбэк начисляется»)
+        lower_words = set(re.findall(r"(?<![\w])[а-яё]+(?![\w])", text))
         # Natasha обучена на прозе; размечаем построчно, чтобы таблицы не путали модель
         offset = 0
         for line in text.split("\n"):
@@ -194,15 +196,22 @@ class Redactor:
                     if s.type != "PER":
                         continue
                     val = line[s.start : s.stop]
+                    # хвост из разделителей (ячейки таблиц из PDF: «Иванов Пётр Сергеевич||») не часть имени
+                    trimmed = re.sub(r"[^A-Za-zА-Яа-яЁё]+$", "", val)
+                    stop = s.start + len(trimmed)
+                    val = trimmed
                     # одиночное слово с маленькой буквы или латиница: не ФИО
                     if not re.match(r"[А-ЯЁ]", val) or _PLACEHOLDER.search(val):
+                        continue
+                    # одно слово, которое в тексте встречается и со строчной: обычное слово, а не фамилия
+                    if " " not in val.strip() and val.lower() in lower_words:
                         continue
                     # вопрос пользователя: одно слово с заглавной в начале фразы, за которым идёт слово
                     # со строчной, обычно глагол («Предложи формулировку»), а не имя
                     if query and " " not in val.strip() and re.match(r"^\s*$|.*[.!?]\s*$", line[: s.start]) \
                             and re.match(r"\s+[а-яё]", line[s.stop:]):
                         continue
-                    out.append(Detection("person", offset + s.start, offset + s.stop, val))
+                    out.append(Detection("person", offset + s.start, offset + stop, val))
             offset += len(line) + 1
         return out
 
@@ -225,6 +234,12 @@ class Redactor:
         if not self.enabled:
             return text
         dets = self.detect(text, query=query)
+        # найденное имя маскируем везде, где оно встречается, а не только там, где его увидела NER
+        names = {_canon("person", d.value) for d in dets if d.kind == "person"} | {c for k, c in self.forward if k == "person"}
+        extra = [Detection("person", m.start(), m.end(), m.group(0))
+                 for c in names if c for m in _person_rx(c).finditer(text)]
+        if extra:
+            dets = _resolve_overlaps(dets + extra, text)
         out: list[str] = []
         pos = 0
         for d in dets:
@@ -253,7 +268,7 @@ class Redactor:
         leaks = self.detect(clean, with_ner=False)
         # значения, которые уже замаскированы где-то ещё, тоже не должны встречаться
         for (kind, canon), _ph in self.forward.items():
-            if kind == "person" and canon and re.search(rf"(?<![\w]){re.escape(canon)}(?![\w])", _canon("person", clean)):
+            if kind == "person" and canon and _person_rx(canon).search(clean):
                 leaks.append(Detection(kind, 0, 0, canon))
         if leaks:
             kinds = ", ".join(sorted({KIND_LABEL[d.kind] for d in leaks}))
@@ -261,6 +276,18 @@ class Redactor:
 
     def stats(self) -> dict[str, int]:
         return {KIND_LABEL[k]: v for k, v in sorted(self.counters.items())}
+
+
+def _person_rx(canon: str) -> re.Pattern:
+    """Все вхождения известного имени: регистр и пробелы любые, но одиночное слово только с заглавной
+    (фамилия «Роза» не должна задевать слово «роза»)."""
+    words = canon.split()
+    if len(words) == 1:
+        w = words[0]
+        body = f"(?-i:{re.escape(w[0].upper())})(?i:{re.escape(w[1:])})"
+    else:
+        body = "(?i:" + r"\s+".join(re.escape(x) for x in words) + ")"
+    return re.compile(rf"(?<![\w]){body}(?![\w])")
 
 
 def _canon(kind: str, value: str) -> str:
