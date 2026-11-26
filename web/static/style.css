@@ -25,7 +25,7 @@ pre.masked { background: #fff; border: 1px solid #ddd; padding: 12px; max-height
 .tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid #ddd; margin: 12px 0; }
 .tabs button { border: none; background: none; border-bottom: 2px solid transparent; }
 .tabs button.active { border-bottom-color: #1d1d1f; }
-#report-frame { width: 100%; height: 75vh; border: 1px solid #ddd; background: #fff; }
+.docframe { width: 100%; height: 75vh; border: 1px solid #ddd; border-radius: 6px; background: #fff; }
 .question { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin: 10px 0; }
 .question label { display: block; }
 .error { color: #b00020; }

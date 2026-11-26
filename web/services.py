@@ -19,6 +19,7 @@ from validator import pipeline, report
 from validator.clarify import write_questions
 from validator.config import Config
 from validator.criteria import ALL
+from validator.redact import _PLACEHOLDER
 
 ROOT = Path(__file__).resolve().parent.parent
 SAMPLES = ROOT / "samples"
@@ -125,7 +126,8 @@ def mask_preview(doc_id: str, o: RunOptions) -> dict:
     masked = (res.audit_dir / "masked_input.md").read_text(encoding="utf-8")
     rows = [{"placeholder": ph, "kind": ph.strip("[]").rsplit("_", 1)[0], "value": _shorten(v)}
             for ph, v in (res.redactor.backward.items() if res.redactor else [])]
-    return {"masked": masked, "replacements": rows, "enabled": o.redact}
+    return {"masked": masked, "masked_html": markdown_html(masked, highlight_placeholders=True),
+            "replacements": rows, "enabled": o.redact}
 
 
 def _shorten(v: str) -> str:
@@ -196,8 +198,16 @@ def report_markdown(res) -> str:
     return report.Renderer(res).render()
 
 
+def markdown_html(text: str, highlight_placeholders: bool = False) -> str:
+    """Markdown в HTML. Показывать только в iframe с sandbox: в документе может быть сырой HTML."""
+    html = markdown.markdown(text, extensions=["tables", "fenced_code", "md_in_html", "sane_lists"])
+    if highlight_placeholders:
+        html = _PLACEHOLDER.sub(lambda m: f'<mark class="ph">{m.group(0)}</mark>', html)
+    return html
+
+
 def report_html(res) -> str:
-    return markdown.markdown(report_markdown(res), extensions=["tables", "fenced_code", "md_in_html"])
+    return markdown_html(report_markdown(res))
 
 
 def run_view(res) -> dict:

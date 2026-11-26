@@ -84,6 +84,8 @@ function table(rows, cols) {
 }
 
 const cards = (items) => `<div class="cards">${items.map(([label, value]) => `<div class="card"><b>${esc(value)}</b>${esc(label)}</div>`).join("")}</div>`;
+// HTML документа или отчёта показываем только в iframe с sandbox (без скриптов), со своими стилями
+const docPage = (html) => `<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="${location.origin}/static/doc.css"><body>${html}</body>`;
 const showError = (el, e) => { el.innerHTML = `<p class="error">${esc(e.message || e)}</p>`; };
 
 // ---------- страница «Проверка» ----------
@@ -121,7 +123,12 @@ async function onPreview() {
     out.innerHTML = (p.replacements.length
       ? `<p class="ok">Замаскировано значений: ${p.replacements.length}</p>` + table(p.replacements, [["placeholder", "Метка"], ["kind", "Тип"], ["value", "Исходное (частично)"]])
       : `<p>Чувствительных данных не найдено${p.enabled ? "" : " (маскирование выключено)"}</p>`)
-      + `<details><summary>Текст, который увидит модель</summary><pre class="masked">${esc(p.masked)}</pre></details>`;
+      + `<h3>Документ, который увидит модель</h3>
+         <p class="muted">Подсвечены замаскированные значения. <label><input type="checkbox" id="raw-toggle"> исходный текст</label></p>
+         <iframe id="masked-frame" class="docframe" sandbox title="Маскированный документ"></iframe>
+         <pre class="masked" id="masked-raw" hidden>${esc(p.masked)}</pre>`;
+    $("#masked-frame").srcdoc = docPage(p.masked_html);
+    $("#raw-toggle").onchange = (e) => { $("#masked-frame").hidden = e.target.checked; $("#masked-raw").hidden = !e.target.checked; };
   } catch (e) { showError(out, e); }
 }
 
@@ -180,7 +187,7 @@ async function showResult(runId) {
   $("#res-meta").textContent = `${r.document.name} · ${new Date(r.started).toLocaleString("ru-RU")} · прогон ${r.id}`;
   renderOverview(r); renderFindings(r); renderRequirements(r); renderQuestions(r); renderChecklist(r); renderPassport(r); renderFiles(r);
   api.reportHtml(r.id).then((html) => {
-    $("#report-frame").srcdoc = `<meta charset="utf-8"><style>body{font:14px/1.5 system-ui;padding:16px}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 6px}</style>${html}`;
+    $("#report-frame").srcdoc = docPage(html);
   });
 }
 
