@@ -167,10 +167,47 @@ class FixedDocument(BaseModel):
     open_points: list[str] = Field(description="Что не удалось исправить без решения заказчика (помечено [УТОЧНИТЬ: ...])")
 
 
+class DocEdit(BaseModel):
+    line: int = Field(description="Номер строки документа, где начинается заменяемый фрагмент")
+    old_text: str = Field(description="Фрагмент документа дословно, как в тексте (без номера строки), "
+                                      "достаточно длинный, чтобы встречаться один раз; пусто, если текст вставляется после строки line")
+    new_text: str = Field(description="Чем заменить фрагмент (или что вставить после строки line)")
+    reason: str = Field(description="Коротко: что исправляет правка, со ссылкой на ID находки")
+
+
+class AnswerDraft(BaseModel):
+    question_id: str = Field(description="ID вопроса заказчику: В-1, В-2…")
+    answer: str = Field(description="Предлагаемый ответ: «Вариант N: …» из списка вариантов или свой текст")
+    basis: str = Field(description="На чём основан ответ: строка документа или «допущение, нужно подтверждение заказчика»")
+
+
 class AssistantReply(BaseModel):
     answer: str = Field(description="Ответ пользователю по-русски: коротко, по делу, со ссылками на строки и ID находок")
-    suggested_text: str = Field(description="Готовая формулировка для вставки в документ (исправленное требование, "
-                                            "разбивка на атомарные требования, тест-кейсы); пусто, если не нужна")
+    suggested_text: str = Field(description="Текст для показа (тест-кейсы, пример формулировки); пусто, если не нужен "
+                                            "или если всё уже есть в edits")
+    edits: list[DocEdit] = Field(default_factory=list,
+                                 description="Правки рабочей редакции документа; только если пользователь просит исправить, "
+                                             "переписать, разбить или дополнить документ")
+    answers: list[AnswerDraft] = Field(default_factory=list,
+                                       description="Черновики ответов на вопросы заказчику; только если пользователь просит "
+                                                   "помочь с ответами")
+
+
+class StandardCriterionDraft(BaseModel):
+    code: str = Field(description="Код латиницей snake_case; для критериев набора начинается с set_")
+    scope: str = Field(description="requirement (проверяется каждое требование) или set (весь набор)")
+    name: str = Field(description="Название критерия по-русски, 1-4 слова")
+    short: str = Field(description="Короткое имя для колонки таблицы, до 8 символов")
+    source: str = Field(description="Пункт или раздел стандарта, на который ссылается критерий")
+    question: str = Field(description="Что проверяет агент: 1-3 предложения, когда нарушение и когда ставить na")
+
+
+class StandardDraft(BaseModel):
+    id: str = Field(description="Идентификатор латиницей snake_case, 2-40 символов")
+    title: str = Field(description="Краткое название стандарта")
+    cite: str = Field(description="Полная ссылка для отчёта: название, год, разделы")
+    description: str = Field(description="Одно предложение: что добавляет стандарт к проверке")
+    criteria: list[StandardCriterionDraft]
 
 
 class Conclusion(BaseModel):

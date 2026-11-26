@@ -3,8 +3,9 @@
 Каждый стандарт описан файлом validator/standards/<id>.json: какие критерии он
 добавляет и на какие пункты ссылается. Профиль проверки собирается из выбранных
 стандартов: ISO/IEC/IEEE 29148 обязателен (базовая модель качества), остальные
-добавляют свои критерии или ссылки к существующим. Свои стандарты можно положить
-в папку из VALIDATOR_STANDARDS_DIR.
+добавляют свои критерии или ссылки к существующим. Свои стандарты и изменённые
+встроенные лежат в custom_standards/ (или в папке из VALIDATOR_STANDARDS_DIR):
+файл с тем же id заменяет встроенный, удаление файла возвращает исходный.
 
 Формат критерия в файле стандарта:
     {"code": "...", "scope": "requirement" | "set", "name": "...", "short": "...",
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -84,12 +86,14 @@ class StandardError(ValueError):
     pass
 
 
-def _dirs() -> list[Path]:
-    dirs = [BUILTIN_DIR]
+def custom_dir() -> Path:
+    """Папка своих и изменённых стандартов. Файл с тем же id, что у встроенного, заменяет встроенный."""
     extra = os.getenv("VALIDATOR_STANDARDS_DIR", "").strip()
-    if extra:
-        dirs.append(Path(extra))
-    return dirs
+    return Path(extra) if extra else BUILTIN_DIR.parent.parent / "custom_standards"
+
+
+def _dirs() -> list[Path]:
+    return [BUILTIN_DIR, custom_dir()]
 
 
 @lru_cache(maxsize=8)
@@ -119,6 +123,132 @@ def _load_all(dirs: tuple[str, ...]) -> dict[str, Standard]:
 
 def available() -> dict[str, Standard]:
     return _load_all(tuple(str(d) for d in _dirs()))
+
+
+def builtin_ids() -> set[str]:
+    return {f.stem for f in BUILTIN_DIR.glob("*.json")}
+
+
+def reload() -> None:
+    """Сбросить кэш после изменения файлов стандартов."""
+    _load_all.cache_clear()
+    _profile_cached.cache_clear()
+
+
+# ---------- редактирование стандартов (веб-интерфейс) ----------
+
+_ID = re.compile(r"^[a-z0-9_]{2,40}$")
+SCOPES = ("requirement", "set")
+
+
+def raw_standard(sid: str) -> dict:
+    """Действующий JSON стандарта (изменённый, если есть, иначе встроенный)."""
+    s = available().get(sid)
+    if not s:
+        raise StandardError(f"Стандарт {sid!r} не найден")
+    return json.loads(Path(s.path).read_text(encoding="utf-8"))
+
+
+def builtin_standard(sid: str) -> dict | None:
+    p = BUILTIN_DIR / f"{sid}.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else None
+
+
+def clean_standard(raw: dict) -> dict:
+    """Проверить и привести стандарт к формату файла. Ошибки на русском, с номером критерия."""
+    if not isinstance(raw, dict):
+        raise StandardError("Стандарт должен быть объектом JSON")
+    sid = str(raw.get("id", "")).strip().lower()
+    if not _ID.match(sid):
+        raise StandardError("Идентификатор: 2-40 символов, латинские строчные буквы, цифры и _")
+    title = str(raw.get("title", "")).strip()
+    if not title:
+        raise StandardError("Укажите название стандарта")
+    try:
+        order = int(raw.get("order", 100))
+    except (TypeError, ValueError):
+        raise StandardError("Порядок должен быть числом") from None
+    crit_in = raw.get("criteria")
+    if not isinstance(crit_in, list) or not crit_in:
+        raise StandardError("Добавьте хотя бы один критерий")
+    known = {c["code"] for s in available().values() if s.id != sid for c in s.criteria}
+    out, seen = [], set()
+    for n, c in enumerate(crit_in, 1):
+        if not isinstance(c, dict):
+            raise StandardError(f"Критерий {n}: неверный формат")
+        code = str(c.get("code", "")).strip().lower()
+        scope = str(c.get("scope") or ("set" if code.startswith("set_") else "requirement"))
+        if not _ID.match(code):
+            raise StandardError(f"Критерий {n}: код из латинских строчных букв, цифр и _ (2-40 символов)")
+        if scope not in SCOPES:
+            raise StandardError(f"Критерий {n}: область должна быть requirement или set")
+        if scope == "set" and not code.startswith("set_"):
+            raise StandardError(f"Критерий {n}: код критерия набора начинается с set_ (например set_{code})")
+        if scope == "requirement" and code.startswith("set_"):
+            raise StandardError(f"Критерий {n}: код set_… только для критериев набора")
+        if code in seen:
+            raise StandardError(f"Критерий {n}: код {code} уже есть в этом стандарте")
+        seen.add(code)
+        item = {"code": code, "scope": scope}
+        for k in ("name", "short", "source", "question"):
+            v = " ".join(str(c.get(k) or "").split())
+            if v:
+                item[k] = v
+        if not (item.get("name") and item.get("question")) and code not in known:
+            raise StandardError(f"Критерий {n} ({code}): заполните название и что проверяет агент "
+                                "(пустыми их можно оставить, только если критерий дополняет другой стандарт)")
+        out.append(item)
+    res = {"id": sid, "order": order, "title": title,
+           "cite": " ".join(str(raw.get("cite") or title).split()),
+           "description": " ".join(str(raw.get("description") or "").split()), "criteria": out}
+    if sid == BASE_STANDARD:
+        res["mandatory"] = True
+    return res
+
+
+def save_standard(raw: dict, expected_id: str | None = None) -> Standard:
+    """Записать свой стандарт или изменённый встроенный в custom_dir(). Встроенные файлы не трогаем."""
+    data = clean_standard(raw)
+    sid = data["id"]
+    if expected_id is not None and sid != expected_id:
+        raise StandardError("Идентификатор стандарта менять нельзя: создайте новый стандарт")
+    d = custom_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{sid}.json"
+    old = p.read_text(encoding="utf-8") if p.is_file() else None
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, p)
+    reload()
+    try:  # стандарт должен собираться в профиль: и сам, и в паре с базовым
+        profile([sid])
+        if sid == BASE_STANDARD:
+            profile(DEFAULT_STANDARDS)
+    except StandardError:
+        if old is None:
+            p.unlink()
+        else:
+            p.write_text(old, encoding="utf-8")
+        reload()
+        raise
+    return available()[sid]
+
+
+def delete_standard(sid: str) -> str:
+    """Удалить свой стандарт или вернуть встроенный к исходному. Возвращает 'reset' или 'deleted'."""
+    p = custom_dir() / f"{sid}.json"
+    if Path(sid).name != sid or not p.is_file():
+        raise StandardError("Встроенный стандарт без изменений: удалять нечего")
+    builtin = sid in builtin_ids()
+    if not builtin:
+        own = {c["code"] for c in available()[sid].criteria}
+        users = sorted({s.id for s in available().values() if s.id != sid
+                        for c in s.criteria if c["code"] in own and not c.get("name")})
+        if users:
+            raise StandardError(f"Критерии этого стандарта дополняет {', '.join(users)}")
+    p.unlink()
+    reload()
+    return "reset" if builtin else "deleted"
 
 
 def _any_criterion(code: str) -> Criterion | None:

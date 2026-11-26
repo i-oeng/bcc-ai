@@ -15,6 +15,7 @@ from pathlib import Path
 
 import markdown
 
+from validator import criteria as criteria_mod
 from validator import pipeline, report
 from validator.clarify import write_questions
 from validator.config import PROVIDERS, Config, provider_defaults
@@ -110,10 +111,70 @@ def providers() -> list[dict]:
 
 
 def standards() -> list[dict]:
-    return [{"id": s.id, "title": s.title, "description": s.description, "mandatory": s.id == BASE_STANDARD,
-             "default": s.id in DEFAULT_STANDARDS,
-             "criteria": [c.get("name") for c in s.criteria if c.get("name")]}
-            for s in sorted(available().values(), key=lambda s: s.order)]
+    """Все стандарты с критериями. kind: builtin (встроенный), modified (встроенный, изменён), custom (свой)."""
+    builtin = criteria_mod.builtin_ids()
+    out = []
+    for s in sorted(available().values(), key=lambda s: (s.order, s.id)):
+        overridden = Path(s.path).parent.resolve() != criteria_mod.BUILTIN_DIR.resolve()
+        kind = ("modified" if overridden else "builtin") if s.id in builtin else "custom"
+        out.append({"id": s.id, "title": s.title, "cite": s.cite, "description": s.description, "order": s.order,
+                    "mandatory": s.id == BASE_STANDARD, "default": s.id in DEFAULT_STANDARDS, "kind": kind,
+                    "criteria": [{"code": c["code"], "scope": c.get("scope", "set" if c["code"].startswith("set_") else "requirement"),
+                                  "name": c.get("name", ""), "short": c.get("short", ""), "source": c.get("source", ""),
+                                  "question": c.get("question", ""), "extends": not c.get("name")}
+                                 for c in s.criteria]})
+    return out
+
+
+def standard_raw(sid: str) -> dict:
+    try:
+        return criteria_mod.raw_standard(sid)
+    except criteria_mod.StandardError as e:
+        raise NotFound(str(e)) from e
+
+
+def save_standard(raw: dict, expected_id: str | None = None) -> dict:
+    """Сохранить стандарт (свой или изменённый встроенный). StandardError с понятным текстом при ошибке."""
+    s = criteria_mod.save_standard(raw, expected_id)
+    return next(x for x in standards() if x["id"] == s.id)
+
+
+def delete_standard(sid: str) -> str:
+    if sid not in available():
+        raise NotFound(f"Стандарт {sid!r} не найден")
+    return criteria_mod.delete_standard(sid)
+
+
+def draft_standard(text: str, o: RunOptions) -> dict:
+    """Черновик стандарта по тексту или описанию: один запрос к модели. Не сохраняется, пока пользователь не нажмёт «Сохранить»."""
+    from validator import prompts
+    from validator.llm import make_client
+    from validator.redact import Redactor
+    from validator.schemas import StandardDraft
+
+    cfg = make_config(o)
+    red = Redactor(enabled=cfg.redact, use_ner=False)  # текст стандарта обычно публичный, но точные детекторы оставляем
+    client = make_client(cfg, red, ROOT / "runs" / "standard_drafts", log=lambda *_: None)
+    out = client.generate("standard_draft", prompts.STANDARD_DRAFT_SYSTEM, prompts.standard_draft(red.redact(text)), StandardDraft)
+    data = out.model_dump()
+    data["id"] = re.sub(r"[^a-z0-9_]+", "_", data["id"].lower()).strip("_")[:40] or "my_standard"
+    for c in data["criteria"]:
+        c["code"] = re.sub(r"[^a-z0-9_]+", "_", c["code"].lower()).strip("_")[:40]
+        if c["scope"] not in criteria_mod.SCOPES:
+            c["scope"] = "set" if c["code"].startswith("set_") else "requirement"
+        if c["scope"] == "set" and not c["code"].startswith("set_"):
+            c["code"] = ("set_" + c["code"])[:40]
+        for k in ("name", "short", "source", "question"):
+            c[k] = _no_dashes(red.restore(c[k]))
+    for k in ("title", "cite", "description"):
+        data[k] = _no_dashes(red.restore(data[k]))
+    data["order"] = 100
+    data["model"] = client.usage.steps[-1][1] if client.usage.steps else cfg.model
+    return data
+
+
+def _no_dashes(s: str) -> str:
+    return re.sub(r"\s+[—–]\s+", ": ", s or "").replace("—", ":").replace("–", "-").strip()
 
 
 def public_options(o: RunOptions) -> dict:
@@ -391,6 +452,124 @@ def compare(run_a: str, run_b: str) -> dict:
     return {"before": a, "after": b, "by_criterion": crit}
 
 
+# ---------- рабочая редакция документа ----------
+# Копия текста документа в runs/<проверка>/draft/, которую правят помощник и пользователь.
+# Каждая правка пишется в журнал с предыдущим текстом, поэтому её можно отменить.
+# Исходный файл документа не меняется; редакцию можно скачать или отправить на новую проверку.
+
+MAX_HISTORY = 50
+
+
+def _draft_dir(res) -> Path:
+    return res.audit_dir / "draft"
+
+
+def _draft_log(res) -> list[dict]:
+    try:
+        return json.loads((_draft_dir(res) / "history.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def draft_text(res) -> str:
+    p = _draft_dir(res) / "draft.md"
+    return p.read_text(encoding="utf-8") if p.is_file() else res.doc.text
+
+
+def _save_draft(res, text: str, entry: dict) -> None:
+    d = _draft_dir(res)
+    d.mkdir(parents=True, exist_ok=True)
+    log = _draft_log(res)
+    log.append({**entry, "prev": draft_text(res), "at": __import__("datetime").datetime.now().isoformat(timespec="seconds")})
+    (d / "history.json").write_text(json.dumps(log[-MAX_HISTORY:], ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp = d / "draft.tmp"
+    tmp.write_text(text, encoding="utf-8")
+    __import__("os").replace(tmp, d / "draft.md")
+
+
+def _stem(res) -> str:
+    """Имя документа без префикса хэша загрузки (1e088fbcbbd8_имя.md)."""
+    return re.sub(r"^[0-9a-f]{12}_", "", res.doc.path.stem)
+
+
+def draft_view(res) -> dict:
+    text = draft_text(res)
+    log = _draft_log(res)
+    return {"text": text, "changed": text != res.doc.text, "lines": len(text.split("\n")),
+            "edits": [{k: e.get(k, "") for k in ("kind", "reason", "old", "new", "at")} for e in log],
+            "can_undo": bool(log), "name": f"{_stem(res)}_редакция.md"}
+
+
+class EditError(ValueError):
+    pass
+
+
+_NUM_PREFIX = re.compile(r"(?m)^\s*\d+\|\s?")
+
+
+def _locate(text: str, old: str, line: int) -> tuple[int, int]:
+    """Где в тексте фрагмент old: точное совпадение, а если пробелы разошлись, совпадение по словам.
+    Из нескольких совпадений берём ближайшее к строке line."""
+    def line_of(pos: int) -> int:
+        return text.count("\n", 0, pos) + 1
+
+    spans = [(m.start(), m.end()) for m in re.finditer(re.escape(old), text)]
+    if not spans:
+        words = old.split()
+        if words:
+            pat = r"\s+".join(re.escape(w) for w in words)
+            spans = [(m.start(), m.end()) for m in re.finditer(pat, text)]
+    if not spans:
+        raise EditError("Фрагмент не найден в редакции: возможно, его уже изменили. Попросите помощника предложить правку заново.")
+    return min(spans, key=lambda s: abs(line_of(s[0]) - (line or 1)))
+
+
+def apply_edit(res, old_text: str, new_text: str, line: int = 0, reason: str = "") -> dict:
+    text = draft_text(res)
+    old = _NUM_PREFIX.sub("", old_text or "").strip("\n")
+    new = _NUM_PREFIX.sub("", new_text or "")
+    if old.strip():
+        a, b = _locate(text, old, line)
+        updated = text[:a] + new + text[b:]
+    else:  # вставка после строки line
+        lines = text.split("\n")
+        at = max(0, min(int(line or len(lines)), len(lines)))
+        updated = "\n".join(lines[:at] + new.split("\n") + lines[at:])
+    if updated == text:
+        raise EditError("Правка ничего не меняет")
+    _save_draft(res, updated, {"kind": "edit", "reason": reason, "old": old, "new": new})
+    return draft_view(res)
+
+
+def set_draft(res, text: str) -> dict:
+    text = text.replace("\r\n", "\n")
+    if text != draft_text(res):
+        _save_draft(res, text, {"kind": "manual", "reason": "правка вручную"})
+    return draft_view(res)
+
+
+def undo_draft(res) -> dict:
+    log = _draft_log(res)
+    if not log:
+        raise EditError("Отменять нечего")
+    last = log.pop()
+    d = _draft_dir(res)
+    (d / "draft.md").write_text(last["prev"], encoding="utf-8")
+    (d / "history.json").write_text(json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
+    return draft_view(res)
+
+
+def reset_draft(res) -> dict:
+    if draft_text(res) != res.doc.text:
+        _save_draft(res, res.doc.text, {"kind": "reset", "reason": "возврат к исходному тексту"})
+    return draft_view(res)
+
+
+def draft_upload(res) -> str:
+    """Редакция как загруженный документ: её можно проверить заново и сравнить «до и после»."""
+    return save_upload(f"{_stem(res)}_редакция.md", draft_text(res).encode("utf-8"))
+
+
 # ---------- ИИ-помощник ----------
 
 
@@ -411,7 +590,11 @@ def assistant(res, question: str, history: list[dict], focus: dict | None, o: Ru
     mask = red.redact if red else (lambda s: s)
     mask_q = red.redact_query if red else (lambda s: s)
     unmask = red.restore if red else (lambda s: s)
-    masked_doc = (res.audit_dir / "masked_input.md").read_text(encoding="utf-8")
+    draft = draft_text(res)
+    # помощник видит рабочую редакцию, если её уже правили: иначе его правки не найдутся в тексте
+    masked_doc = mask(draft) if draft != res.doc.text else (res.audit_dir / "masked_input.md").read_text(encoding="utf-8")
+    questions = "\n".join(f"В-{i}. {q.question} Варианты: " + "; ".join(f"Вариант {k}: {o}" for k, o in enumerate(q.options, 1))
+                          for i, q in enumerate(res.questions, 1))
 
     op = res.open_findings()
     summary = (f"Разработка: {res.decision_dev}. Тестирование: {res.decision_test}.\n"
@@ -443,8 +626,24 @@ def assistant(res, question: str, history: list[dict], focus: dict | None, o: Ru
     cfg = make_config(o)
     client = make_client(cfg, red, res.audit_dir / "assistant", log=lambda *_: None)
     out = client.generate("assistant", prompts.ASSISTANT_SYSTEM,
-                          prompts.assistant(_numbered(masked_doc), summary, focus_txt, dialog, mask_q(question)),
+                          prompts.assistant(_numbered(masked_doc), summary, focus_txt, dialog, mask_q(question),
+                                            mask(questions)),
                           AssistantReply)
     clean = lambda s: _re.sub(r"\s+[—–]\s+", ": ", unmask(s or "")).strip()  # noqa: E731
     model = client.usage.steps[-1][1] if client.usage.steps else cfg.model
-    return {"answer": clean(out.answer), "suggested_text": clean(out.suggested_text), "model": model}
+    known_q = {f"В-{i}" for i in range(1, len(res.questions) + 1)}
+    edits = [{"line": e.line, "old_text": unmask(_NUM_PREFIX.sub("", e.old_text)).strip("\n"),
+              "new_text": unmask(_NUM_PREFIX.sub("", e.new_text)), "reason": clean(e.reason)}
+             for e in out.edits if (e.new_text or "").strip()]
+    for e in edits:  # заранее проверяем, что фрагмент есть в редакции: кнопку «Применить» показываем только для таких
+        try:
+            if e["old_text"].strip():
+                _locate(draft, e["old_text"], e["line"])
+            e["ok"] = True
+        except EditError:
+            e["ok"] = False
+    answers = [{"question_id": a.question_id.replace("B", "В").strip(), "answer": clean(a.answer), "basis": clean(a.basis)}
+               for a in out.answers if a.answer.strip()]
+    answers = [a for a in answers if a["question_id"] in known_q]
+    return {"answer": clean(out.answer), "suggested_text": clean(out.suggested_text), "model": model,
+            "edits": edits, "answers": answers}

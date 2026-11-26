@@ -17,17 +17,18 @@
       <a href="#/result" data-route="result">Результат</a>
       <a href="#/history" data-route="history">История</a>
       <a href="#/compare" data-route="compare">До и после</a>
+      <a href="#/standards" data-route="standards">Стандарты</a>
       <button id="settings-toggle" type="button">Настройки</button>
       <button id="theme-toggle" type="button" aria-pressed="false">Тёмная тема</button>
     </nav>
   </header>
 
-  <div class="newsbar">
-    <span class="news-label">Состояние</span>
-    <span id="job-indicator" class="news-text">Готово</span>
-    <span id="status-model" class="news-meta"></span>
-    <span id="status-key" class="news-meta"></span>
-  </div>
+  <a class="newsbar" id="newsbar" href="#/check" hidden aria-live="polite">
+    <span class="news-label">Идёт проверка</span>
+    <span id="job-indicator" class="news-text busy"></span>
+    <span class="news-progress" aria-hidden="true"><span class="progress"><span id="news-bar"></span></span></span>
+    <span id="news-pct" class="news-meta"></span>
+  </a>
 
   <aside id="settings" class="sheet" hidden>
     <div class="sheet-head"><h2>Настройки</h2><button type="button" class="sheet-close" id="settings-close" aria-label="Закрыть">×</button></div>
@@ -43,6 +44,7 @@
     <fieldset>
       <legend>Стандарты</legend>
       <div id="opt-standards"></div>
+      <p class="small"><a href="#/standards" id="std-manage">Изменить или добавить стандарты</a></p>
     </fieldset>
     <fieldset>
       <legend>Скорость и данные</legend>
@@ -76,12 +78,11 @@
     <section id="view-check" class="view">
       <h1 class="hero">Проверка требований.</h1>
       <p class="tagline">Агент находит противоречия, пробелы и непроверяемые формулировки и привязывает каждое нарушение к строке документа.</p>
-      <div class="box">
+      <div class="box" id="drop-zone">
         <h2>Документы</h2>
-        <div class="row">
-          <label class="field inline">Пример <select id="sample-select"><option value="">(добавить пример)</option></select></label>
-          <span class="muted">или</span>
-          <label class="btn file-btn">Выбрать файлы<input id="file-input" type="file" multiple accept=".pdf,.docx,.md,.txt,.html,.htm" hidden></label>
+        <div class="drop-target">
+          <label class="btn file-btn">Выбрать файл(ы)<input id="file-input" type="file" multiple accept=".pdf,.docx,.md,.txt,.html,.htm" hidden></label>
+          <span class="muted small">или перетащите / вставьте сюда</span>
         </div>
         <div id="doc-list"></div>
         <label class="check"><input id="opt-fix" type="checkbox"> Сформировать исправленную редакцию документа</label>
@@ -125,6 +126,27 @@
           <div id="questions-list"></div>
         </section>
 
+        <section class="res-section" aria-labelledby="h-draft" id="draft-section">
+          <h2 id="h-draft">Рабочая редакция документа</h2>
+          <p class="muted" id="draft-status"></p>
+          <div class="row actions draft-actions">
+            <button type="button" class="btn" id="draft-edit">Править вручную</button>
+            <button type="button" class="btn" id="draft-undo">Отменить последнюю правку</button>
+            <a class="btn" id="draft-download">Скачать</a>
+            <button type="button" class="btn primary" id="draft-check">Проверить редакцию</button>
+            <button type="button" class="link" id="draft-reset">Вернуть исходный текст</button>
+          </div>
+          <div id="draft-editor" class="box" hidden>
+            <textarea id="draft-text" rows="22" spellcheck="false" aria-label="Текст рабочей редакции"></textarea>
+            <div class="row actions">
+              <button type="button" class="btn primary" id="draft-save">Сохранить</button>
+              <button type="button" class="btn" id="draft-cancel">Отмена</button>
+            </div>
+          </div>
+          <div id="draft-out"></div>
+          <details class="more" id="draft-log-box"><summary>Журнал правок <span class="count" id="c-draft"></span></summary><div id="draft-log"></div></details>
+        </section>
+
         <section class="res-section" aria-labelledby="h-more">
           <h2 id="h-more">Подробности</h2>
           <details class="more" data-more="requirements"><summary>Требования <span class="count" id="c-req"></span></summary><div id="more-requirements"></div></details>
@@ -155,12 +177,29 @@
         <div id="compare-out"></div>
       </div>
     </section>
+
+    <section id="view-standards" class="view" hidden>
+      <h1 class="hero">Стандарты.</h1>
+      <p class="tagline">По каким критериям агент проверяет требования. Встроенные можно менять, свои добавлять.</p>
+      <div class="row actions std-toolbar">
+        <button type="button" class="btn primary" id="std-new">Новый стандарт</button>
+        <label class="btn file-btn">Загрузить из файла<input id="std-import" type="file" accept=".json,application/json" hidden></label>
+        <button type="button" class="btn" id="std-ai-toggle">Составить с помощью ИИ</button>
+      </div>
+      <div class="box" id="std-ai" hidden>
+        <h2>Черновик с помощью ИИ</h2>
+        <p class="muted">Вставьте текст стандарта, выдержку или просто название (например, «BABOK v3, характеристики качественных требований»). Модель предложит критерии, вы проверите их и сохраните. Один запрос к модели.</p>
+        <textarea id="std-ai-text" rows="6" aria-label="Текст или название стандарта"></textarea>
+        <div class="row actions"><button type="button" class="btn primary" id="std-ai-run">Составить черновик</button><span id="std-ai-out" class="muted"></span></div>
+      </div>
+      <div id="std-editor"></div>
+      <div id="std-list"></div>
+    </section>
   </main>
 
   <footer class="footer">
     <p><a href="#/check">Проверка</a> | <a href="#/history">История</a> | <a href="/docs" target="_blank" rel="noopener">Описание программного интерфейса</a></p>
-    <p id="footer-standards"></p>
-    <p id="status-version"></p>
+    <p class="signature">gtsbbe jr.</p>
   </footer>
 
   <script src="static/app.js"></script>

@@ -8,6 +8,8 @@
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const num = (n) => Number(n || 0).toLocaleString("ru-RU");
+// загруженные файлы хранятся с префиксом хэша (1e088fbcbbd8_имя.md): людям показываем только имя
+const docName = (n) => String(n || "").replace(/^[0-9a-f]{12}_/, "");
 const SEV = { critical: "Критично", major: "Существенно", minor: "Незначительно" };
 const STATUS = { open: "открыто", closed: "закрыто ответом", changed: "изменено ответом" };
 const JOB_STATUS = { queued: "В очереди", running: "Идёт", done: "Готово", error: "Ошибка", cancelled: "Остановлено" };
@@ -41,7 +43,32 @@ const api = {
   answer: (id, answers, options) => api.call("POST", `/api/runs/${encodeURIComponent(id)}/answers`, { answers, options }),
   assistant: (id, question, history, focus, options) => api.call("POST", `/api/runs/${encodeURIComponent(id)}/assistant`, { question, history, focus, options }),
   compare: (a, b) => api.call("GET", `/api/compare?before=${encodeURIComponent(a)}&after=${encodeURIComponent(b)}`),
+  standards: () => api.call("GET", "/api/standards"),
+  saveStandard: (id, body, create) => api.call("PUT", `/api/standards/${encodeURIComponent(id)}${create ? "?create=true" : ""}`, body),
+  deleteStandard: (id) => api.call("DELETE", `/api/standards/${encodeURIComponent(id)}`),
+  draftStandard: (text, options) => api.call("POST", "/api/standards/draft", { text, options }),
+  draft: (id) => api.call("GET", `/api/runs/${encodeURIComponent(id)}/draft`),
+  draftEdit: (id, edit) => api.call("POST", `/api/runs/${encodeURIComponent(id)}/draft/edit`, edit),
+  draftSave: (id, text) => api.call("PUT", `/api/runs/${encodeURIComponent(id)}/draft`, { text }),
+  draftUndo: (id) => api.call("POST", `/api/runs/${encodeURIComponent(id)}/draft/undo`),
+  draftReset: (id) => api.call("POST", `/api/runs/${encodeURIComponent(id)}/draft/reset`),
+  draftCheck: (id, options) => api.call("POST", `/api/runs/${encodeURIComponent(id)}/draft/check`, { options }),
 };
+
+// Название модели для людей: «gemini-3.6-flash» превращается в «Gemini 3.6 Flash», «claude-opus-5-5» в «Claude Opus 5.5».
+// Соседние числа склеиваются в версию, дата выпуска в конце (20250929) отбрасывается. В настройках и отчёте остаётся точный идентификатор.
+function modelLabel(id) {
+  const parts = String(id || "").replace(/^models\//, "").split(/[-_/\s:]+/).filter(Boolean);
+  const out = [];
+  for (const p of parts) {
+    if (/^\d{8}$/.test(p) || p === "latest") continue;
+    const prev = out[out.length - 1];
+    if (/^\d+$/.test(p) && prev && /^\d+(\.\d+)*$/.test(prev)) out[out.length - 1] = `${prev}.${p}`;
+    else out.push(p);
+  }
+  return out.map((w) => (/^(gpt|glm|qwq)$/i.test(w) || /^[a-z]{1,2}$/i.test(w) ? w.toUpperCase()
+    : /^[a-zа-я]/i.test(w) ? w[0].toUpperCase() + w.slice(1) : w)).join(" ");
+}
 
 // ---------- состояние и настройки ----------
 
@@ -68,12 +95,7 @@ const settings = {
     $("#opt-provider").innerHTML = st.providers.map((p) => `<option value="${esc(p.id)}">${esc(p.title)}</option>`).join("");
     $("#opt-provider").value = saved.provider || d.provider;
     settings.fillProvider(saved.perProvider?.[settings.provider()]);
-    const chosen = saved.standards || d.standards;
-    $("#opt-standards").innerHTML = st.standards.map((s) => `
-      <label class="check std" title="${esc(s.description)}">
-        <input type="checkbox" value="${esc(s.id)}" ${s.mandatory ? "checked disabled" : chosen.includes(s.id) ? "checked" : ""}>
-        <span><b>${esc(s.title)}</b>${s.mandatory ? " (всегда)" : ""}<br><span class="muted small">${esc(s.description)}</span></span>
-      </label>`).join("");
+    settings.renderStandards(saved.standards || d.standards);
     $("#opt-batch").value = saved.batch_size || d.batch_size;
     $("#opt-parallel").value = saved.parallel || d.parallel;
     $("#opt-redact").checked = saved.redact ?? d.redact;
@@ -94,8 +116,14 @@ const settings = {
     const p = settings.providerInfo(settings.provider());
     const own = !!state.keys[p.id];
     $("#key-status").textContent = own ? "Используется ключ из этого поля." : p.has_env_key ? "Ключ найден в .env." : "В .env ключа нет: впишите его здесь.";
-    $("#status-key").textContent = own ? "Ключ: из настроек" : p.has_env_key ? "Ключ: .env" : "Ключ: не задан";
-    $("#status-model").textContent = `${p.title}: ${$("#opt-model").value.trim() || p.model}`;
+  },
+  renderStandards(chosen) {
+    chosen ||= settings.saved().standards || state.status.defaults.standards;
+    $("#opt-standards").innerHTML = state.status.standards.map((s) => `
+      <label class="check std" title="${esc(s.description)}">
+        <input type="checkbox" value="${esc(s.id)}" ${s.mandatory ? "checked disabled" : chosen.includes(s.id) ? "checked" : ""}>
+        <span><b>${esc(s.title)}</b>${s.mandatory ? " (всегда)" : ""}${s.kind === "custom" ? " (свой)" : s.kind === "modified" ? " (изменён)" : ""}<br><span class="muted small">${esc(s.description)}</span></span>
+      </label>`).join("");
   },
   read() {
     const provider = settings.provider();
@@ -145,31 +173,46 @@ function renderDocs() {
   const el = $("#doc-list");
   $("#btn-run").disabled = !state.docs.length;
   $("#btn-run").textContent = state.docs.length > 1 ? `Проверить все (${state.docs.length})` : "Проверить";
-  if (!state.docs.length) { el.innerHTML = `<p class="muted">Добавьте один или несколько документов: PDF, DOCX, MD, TXT, HTML.</p>`; return; }
+  if (!state.docs.length) { el.innerHTML = ""; return; }
   el.innerHTML = table(state.docs, [
-    ["name", "Документ", (v, d) => `<b>${esc(v)}</b><br><span class="muted">«${esc(d.title)}»</span>`],
-    ["format", "Формат", (v) => esc(v.toUpperCase())],
-    ["lines", "Строк", (v) => num(v)],
-    ["chars", "Символов", (v) => num(v)],
+    ["name", "Документ", (v, d) => `<b>${esc(docName(v))}</b>${d.title && d.title !== docName(v) ? `<br><span class="muted">${esc(d.title)}</span>` : ""}`],
     ["id", "", (v) => `<button type="button" class="link" data-preview="${esc(v)}">Что уйдёт в модель</button> / <button type="button" class="link" data-remove="${esc(v)}">Убрать</button>`],
   ], "doclist");
   el.querySelectorAll("[data-preview]").forEach((b) => { b.onclick = () => onPreview(b.dataset.preview); });
   el.querySelectorAll("[data-remove]").forEach((b) => { b.onclick = () => { state.docs = state.docs.filter((d) => d.id !== b.dataset.remove); renderDocs(); }; });
 }
 
-async function onSample() {
-  const id = $("#sample-select").value;
-  $("#sample-select").value = "";
-  if (!id) return;
-  try { addDoc(await api.document(id)); } catch (e) { showError($("#preview"), e); }
-}
-
-async function onFiles() {
-  const files = [...$("#file-input").files];
-  $("#file-input").value = "";
+async function addFiles(files) {
   for (const f of files) {
     try { addDoc(await api.upload(f)); } catch (e) { $("#preview").innerHTML = win("Ошибка загрузки", `<p class="error">${esc(f.name)}: ${esc(e.message)}</p>`); }
   }
+}
+
+// Файлы можно перетащить на блок «Документы» или вставить (Ctrl+V) на странице «Проверка».
+// Вставленный текст без файла становится документом «вставленный_текст.md».
+function setupDrop() {
+  const zone = $("#drop-zone");
+  let depth = 0;
+  zone.addEventListener("dragenter", (e) => { if (e.dataTransfer?.types.includes("Files")) { e.preventDefault(); depth++; zone.classList.add("over"); } });
+  zone.addEventListener("dragover", (e) => { if (e.dataTransfer?.types.includes("Files")) e.preventDefault(); });
+  zone.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; zone.classList.remove("over"); } });
+  zone.addEventListener("drop", (e) => {
+    e.preventDefault(); depth = 0; zone.classList.remove("over");
+    addFiles([...(e.dataTransfer?.files || [])]);
+  });
+  // файл, брошенный мимо блока, браузер иначе откроет вместо страницы
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("drop", (e) => e.preventDefault());
+  document.addEventListener("paste", (e) => {
+    if ($("#view-check").hidden || e.target.closest?.("input, textarea, [contenteditable]")) return;
+    const files = [...(e.clipboardData?.files || [])];
+    if (files.length) { e.preventDefault(); addFiles(files); return; }
+    const text = e.clipboardData?.getData("text/plain") || "";
+    if (text.trim().length >= 20) {
+      e.preventDefault();
+      addFiles([new File([text], "вставленный_текст.md", { type: "text/markdown" })]);
+    }
+  });
 }
 
 async function onPreview(docId) {
@@ -238,12 +281,24 @@ async function refreshLog(id) {
   } catch (e) { /* нет такой задачи */ }
 }
 
+// Строка состояния под вкладками: видна только пока идут проверки, на любой странице; клик ведёт к списку проверок.
+function renderNewsbar() {
+  const live = state.jobs.filter((j) => j.status === "running" || j.status === "queued");
+  $("#newsbar").hidden = !live.length;
+  if (!live.length) return;
+  const running = live.filter((j) => j.status === "running");
+  const queued = live.length - running.length;
+  const pct = Math.round(100 * live.reduce((s, j) => s + (j.progress || 0), 0) / live.length);
+  const one = running.length === 1 && !queued ? running[0] : null;
+  $("#job-indicator").textContent = one
+    ? `${docName(one.document)}: ${one.stage || "идёт"}${one.attempt > 1 ? `, попытка ${one.attempt}` : ""}`
+    : `Проверок: ${running.length}` + (queued ? `, в очереди: ${queued}` : "");
+  $("#news-bar").style.width = `${Math.max(4, pct)}%`;
+  $("#news-pct").textContent = `${pct}%` + (one ? ` / ${fmtTime(one.elapsed)} / ${modelLabel(one.model)}` : "");
+}
+
 function renderJobs() {
-  const active = state.jobs.filter((j) => j.status === "running").length;
-  const queued = state.jobs.filter((j) => j.status === "queued").length;
-  const ind = $("#job-indicator");
-  ind.textContent = active || queued ? `Идут проверки: ${active}` + (queued ? `, в очереди: ${queued}` : "") : "Готово";
-  ind.classList.toggle("busy", !!(active || queued));
+  renderNewsbar();
   $("#jobs-box").hidden = !state.jobs.length;
   if (!state.jobs.length) return;
   $("#jobs").innerHTML = state.jobs.map((j) => {
@@ -252,7 +307,7 @@ function renderJobs() {
     const log = state.logs[j.id];
     return `<div class="job ${esc(j.status)}">
       <div class="job-head">
-        <b>${esc(j.document)}</b>
+        <b>${esc(docName(j.document))}</b>
         <span class="job-status">${esc(JOB_STATUS[j.status] || j.status)}${j.stop_requested && live ? " (останавливается)" : ""}${j.elapsed ? ` / ${fmtTime(j.elapsed)}` : ""}${j.attempt > 1 ? ` / попытка ${j.attempt}` : ""}</span>
         <span class="job-actions">
           ${live ? `<button type="button" class="btn small" data-stop="${esc(j.id)}" ${j.stop_requested ? "disabled" : ""}>Остановить</button>` : ""}
@@ -261,8 +316,8 @@ function renderJobs() {
           <button type="button" class="link" data-log="${esc(j.id)}">${state.openLogs.has(j.id) ? "Скрыть журнал" : "Журнал"}</button>
         </span>
       </div>
-      <div class="${bar}"><span></span></div>
-      <p class="muted small job-last">${esc(j.error || j.last)}</p>
+      <div class="${bar}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(j.progress * 100)}"><span style="width:${live ? Math.max(4, Math.round(j.progress * 100)) : 100}%"></span></div>
+      <p class="muted small job-last">${live && j.stage ? `${esc(j.stage)} / ${Math.round(j.progress * 100)}% / ` : ""}${esc(j.error || j.last)}</p>
       ${state.openLogs.has(j.id) ? `<pre class="log">${esc(log ? log.text : "…")}</pre>` : ""}
     </div>`;
   }).join("");
@@ -309,12 +364,13 @@ async function showResult(runId) {
     assistant.reset();
   }
   const r = state.run;
-  $("#res-title").textContent = r.document.title || r.document.name;
-  $("#res-meta").textContent = `${r.document.name} / проверка от ${new Date(r.started).toLocaleString("ru-RU")}`
+  $("#res-title").textContent = r.document.title || docName(r.document.name);
+  $("#res-meta").textContent = `${docName(r.document.name)} / проверка от ${new Date(r.started).toLocaleString("ru-RU")}`
     + (r.elapsed ? ` / ${fmtTime(r.elapsed)}` : "") + ` / ${r.standards.map((x) => x.title).join(", ")}`;
   const files = [["report", "отчёт"], ["questions", "вопросы"], ...(r.has_fixed ? [["fixed", "исправленная редакция"]] : []), ["result", "структурированный результат"]];
   $("#res-files").innerHTML = "Скачать: " + files.map(([k, l]) => `<a href="${api.fileUrl(r.id, k)}">${esc(l)}</a>`).join(" / ");
   renderVerdict(r); renderSevFilter(r); renderFindings(r); renderQuestions(r); renderMore(r);
+  if (draft.runId !== r.id) { $("#draft-editor").hidden = true; $("#draft-out").innerHTML = ""; await draft.load(); }
 }
 
 function verdictWord(text) {
@@ -422,17 +478,36 @@ function renderQuestions(r) {
           ${opts.map((o) => `<label><input type="radio" name="q-${esc(q.id)}" value="${esc(o)}" ${prev[q.id] === o ? "checked" : ""}> ${esc(o)}</label>`).join("")}
           <label><input type="radio" name="q-${esc(q.id)}" value="__own" ${own ? "checked" : ""}> Свой ответ: <input class="own" value="${esc(own)}" aria-label="Свой ответ"></label>
         </fieldset>
-        <p class="card-actions"><button type="button" class="btn small" data-askq="${esc(q.id)}">Помочь с ответом</button></p>
+        <p class="card-actions"><button type="button" class="btn small" data-askq="${esc(q.id)}">Черновик ответа от помощника</button></p>
       </div>
     </details>`;
   }).join("")
     + `<div class="row actions"><label class="check"><input id="ans-fix" type="checkbox" checked> Сформировать исправленную редакцию</label>
+       <button id="btn-answers-ai" class="btn" type="button">Черновики ответов от помощника</button>
        <button id="btn-answers" class="btn primary" type="button">Перепроверить с ответами</button></div><div id="answers-out"></div>`;
   $("#btn-answers").onclick = onAnswers;
+  $("#btn-answers-ai").onclick = () => assistant.ask(QUICK.answers_all, null);
   el.querySelectorAll("[data-askq]").forEach((b) => {
-    b.onclick = () => assistant.ask("Какой вариант ответа выбрать и почему? Что изменится в требованиях при каждом варианте?",
+    b.onclick = () => assistant.ask(QUICK.answer_one,
       { type: "question", id: b.dataset.askq, label: `${b.dataset.askq}: ${r.questions[Number(b.dataset.askq.replace(/\D/g, "")) - 1].question}` });
   });
+}
+
+// Черновик ответа от помощника: выбрать совпадающий вариант или вписать свой ответ. Отправляет ответы только пользователь.
+function fillAnswer(qid, text) {
+  const box = document.querySelector(`.question[data-qid="${CSS.escape(qid)}"]`);
+  if (!box) return false;
+  const norm = (s) => s.toLowerCase().replace(/[«»"".,:;]/g, "").replace(/\s+/g, " ").trim();
+  const radios = [...box.querySelectorAll("input[type=radio]")];
+  const num = text.match(/^Вариант\s+(\d+)/i);
+  const hit = radios.find((r) => r.value !== "__own" && (norm(r.value) === norm(text) || (num && r.value.startsWith(`Вариант ${num[1]}:`))));
+  if (hit) hit.checked = true;
+  else { radios.find((r) => r.value === "__own").checked = true; box.querySelector(".own").value = text; }
+  box.classList.add("drafted");
+  const meta = box.querySelector(".card-meta");
+  if (!meta.textContent.includes("черновик помощника")) meta.textContent += " / черновик помощника";
+  box.open = true;
+  return true;
 }
 
 async function onAnswers() {
@@ -468,9 +543,9 @@ function renderMore(r) {
   $("#more-set").innerHTML = table(r.set_verdicts, [["criterion_name", "Критерий"], ["verdict", "Оценка", (v) => esc(SET[v] || v)], ["comment", "Комментарий"]]);
   const p = r.passport, m = Object.entries(p.masking);
   $("#more-passport").innerHTML = `<dl class="kv">
-      <dt>Документ</dt><dd>${esc(r.document.name)}, SHA-256 ${esc(r.document.sha256.slice(0, 16))}…</dd>
+      <dt>Документ</dt><dd>${esc(docName(r.document.name))}, SHA-256 ${esc(r.document.sha256.slice(0, 16))}…</dd>
       <dt>Стандарты</dt><dd>${esc(r.standards.map((x) => x.title).join(", "))}</dd>
-      <dt>Модель</dt><dd>${esc(settings.providerInfo(p.provider)?.title || p.provider)}, ${esc(p.model)}; запросов ${p.calls}, из кэша ${p.cached}</dd>
+      <dt>Модель</dt><dd>${esc(modelLabel(p.model))} (${esc(settings.providerInfo(p.provider)?.title || p.provider)}); запросов ${p.calls}, из кэша ${p.cached}${[...new Set(p.steps.map((s) => s.model))].filter((m) => m !== p.model).length ? `; запасные: ${esc([...new Set(p.steps.map((s) => s.model))].filter((m) => m !== p.model).map(modelLabel).join(", "))}` : ""}</dd>
       <dt>Агент</dt><dd>${esc(r.agent_version)}</dd>
       <dt>Маскирование</dt><dd>${m.length ? esc(m.map(([k, v]) => `${k}: ${v}`).join(", ")) : "чувствительных данных не найдено"}</dd>
     </dl>` + p.warnings.map((w) => `<p class="error">${esc(w)}</p>`).join("");
@@ -480,13 +555,17 @@ function renderMore(r) {
 
 const QUICK = {
   explain: "Объясни простыми словами, в чём проблема и чем она грозит.",
-  rewrite: "Предложи исправленную формулировку требования.",
-  split: "Разбей это требование на атомарные проверяемые требования.",
+  rewrite: "Исправь формулировку требования в документе: верни правку, которая устраняет это нарушение.",
+  split: "Разбей это требование на атомарные проверяемые требования и верни правку документа.",
   tests: "Какие тест-кейсы нужны, чтобы проверить это требование?",
   question: "Какой вопрос задать заказчику, чтобы закрыть этот дефект?",
+  answer_one: "Предложи черновик ответа на этот вопрос заказчику: какой вариант выбрать и почему, со ссылкой на документ.",
+  answers_all: "Предложи черновики ответов на все вопросы заказчику. Где документ не даёт ответа, отметь это как допущение.",
+  fix_all: "Исправь в документе критичные нарушения: верни правки рабочей редакции.",
 };
 
-const QUICK_LABEL = { explain: "Объяснить", rewrite: "Формулировка", split: "Разбить", tests: "Тест-кейсы", question: "Вопрос заказчику" };
+const QUICK_LABEL = { explain: "Объяснить", rewrite: "Исправить в документе", split: "Разбить", tests: "Тест-кейсы", question: "Вопрос заказчику",
+  answers_all: "Черновики ответов", fix_all: "Исправить критичные" };
 
 const assistant = {
   focus: null,
@@ -504,19 +583,74 @@ const assistant = {
       $("#focus-clear").onclick = () => assistant.setFocus(null);
     }
     const msgs = assistant.chat();
-    $("#chat").innerHTML = (msgs.length ? "" : `<p class="muted chat-empty">Выберите нарушение и нажмите «Объяснить», или спросите о документе в целом.</p>`)
+    $("#chat").innerHTML = (msgs.length ? "" : `<p class="muted chat-empty">Помощник объясняет нарушения, предлагает правки документа и черновики ответов заказчику. Правки попадают в рабочую редакцию только по вашей кнопке.</p>`)
       + msgs.map((m, i) => m.role === "user"
         ? `<div class="msg user">${esc(m.content)}</div>`
-        : `<div class="msg bot ${m.error ? "err" : ""}">${esc(m.content)}${m.suggested ? `<div class="suggested"><pre>${esc(m.suggested)}</pre><button type="button" class="btn small" data-copy="${i}">Скопировать</button></div>` : ""}${m.model ? `<span class="msg-meta">${esc(m.model)}</span>` : ""}</div>`).join("")
+        : `<div class="msg bot ${m.error ? "err" : ""}">${esc(m.content)}${m.suggested ? `<div class="suggested"><pre>${esc(m.suggested)}</pre><button type="button" class="btn small" data-copy="${i}">Скопировать</button></div>` : ""}${assistant.actions(m, i)}${m.model ? `<span class="msg-meta">${esc(modelLabel(m.model))}</span>` : ""}</div>`).join("")
       + (assistant.busy ? `<div class="msg bot thinking" role="status">Помощник думает<span class="dots"></span></div>` : "");
     $("#chat").querySelectorAll("[data-copy]").forEach((b) => {
       b.onclick = async () => { await navigator.clipboard.writeText(msgs[Number(b.dataset.copy)].suggested); b.textContent = "Скопировано"; };
     });
+    $("#chat").querySelectorAll("[data-apply]").forEach((b) => { b.onclick = () => assistant.applyEdit(...b.dataset.apply.split(":").map(Number)); });
+    $("#chat").querySelectorAll("[data-apply-all]").forEach((b) => { b.onclick = () => assistant.applyAll(Number(b.dataset.applyAll)); });
+    $("#chat").querySelectorAll("[data-fill]").forEach((b) => { b.onclick = () => assistant.fill(...b.dataset.fill.split(":").map(Number)); });
+    $("#chat").querySelectorAll("[data-fill-all]").forEach((b) => { b.onclick = () => assistant.fillAll(Number(b.dataset.fillAll)); });
     $("#chat").scrollTop = $("#chat").scrollHeight;
-    const quick = assistant.focus?.type === "finding" ? ["explain", "rewrite", "split", "tests", "question"] : ["explain", "tests"];
-    $("#quick").innerHTML = assistant.focus || msgs.length ? quick.map((k) => `<button type="button" class="chip" data-quick="${k}" title="${esc(QUICK[k])}">${esc(QUICK_LABEL[k])}</button>`).join("") : "";
+    const quick = assistant.focus?.type === "finding" ? ["explain", "rewrite", "split", "tests", "question"]
+      : assistant.focus?.type === "question" ? ["explain"] : ["explain", "fix_all", "answers_all"];
+    $("#quick").innerHTML = quick.map((k) => `<button type="button" class="chip" data-quick="${k}" title="${esc(QUICK[k])}">${esc(QUICK_LABEL[k])}</button>`).join("");
     $("#quick").querySelectorAll("[data-quick]").forEach((b) => { b.onclick = () => assistant.ask(QUICK[b.dataset.quick], assistant.focus); });
     $("#ask-send").disabled = assistant.busy;
+  },
+  // Предложенные правки документа и черновики ответов: применяются только по кнопке.
+  actions(m, i) {
+    let html = "";
+    if (m.edits?.length) {
+      html += `<div class="actions-block"><p class="actions-title">Правки документа: ${m.edits.length}</p>`
+        + m.edits.map((e, j) => `<div class="action ${e.applied ? "done" : ""}">
+            <p class="action-head">${e.old_text ? `Строка ${e.line}` : `Вставка после строки ${e.line}`}${e.reason ? `: ${esc(e.reason)}` : ""}</p>
+            ${e.old_text ? `<del>${esc(e.old_text)}</del>` : ""}<ins>${esc(e.new_text)}</ins>
+            ${e.applied ? `<p class="ok small">Применено к рабочей редакции</p>`
+              : e.ok === false ? `<p class="error small">Фрагмент не найден в текущей редакции</p>`
+              : `<button type="button" class="btn small" data-apply="${i}:${j}">Применить</button>`}
+            ${e.error ? `<p class="error small">${esc(e.error)}</p>` : ""}
+          </div>`).join("")
+        + (m.edits.filter((e) => !e.applied && e.ok !== false).length > 1 ? `<button type="button" class="btn small primary" data-apply-all="${i}">Применить все</button>` : "")
+        + `</div>`;
+    }
+    if (m.answers?.length) {
+      const qs = state.run?.questions || [];
+      html += `<div class="actions-block"><p class="actions-title">Черновики ответов заказчику</p>`
+        + m.answers.map((a, j) => `<div class="action ${a.filled ? "done" : ""}">
+            <p class="action-head">${esc(a.question_id)}${qs.find((q) => q.id === a.question_id) ? `: ${esc(qs.find((q) => q.id === a.question_id).question)}` : ""}</p>
+            <p>${esc(a.answer)}</p><p class="muted small">Основание: ${esc(a.basis)}</p>
+            ${a.filled ? `<p class="ok small">Вписано в форму ответов</p>` : `<button type="button" class="btn small" data-fill="${i}:${j}">Вписать в ответ</button>`}
+          </div>`).join("")
+        + (m.answers.filter((a) => !a.filled).length > 1 ? `<button type="button" class="btn small primary" data-fill-all="${i}">Вписать все</button>` : "")
+        + `<p class="muted small">Это черновик: перед перепроверкой подтвердите ответы у заказчика.</p></div>`;
+    }
+    return html;
+  },
+  async applyEdit(i, j) {
+    const e = assistant.chat()[i].edits[j];
+    try {
+      draft.view = await api.draftEdit(state.run.id, { old_text: e.old_text, new_text: e.new_text, line: e.line, reason: e.reason });
+      e.applied = true; e.error = "";
+      draft.render();
+    } catch (err) { e.error = err.message; }
+    assistant.render();
+  },
+  async applyAll(i) {
+    for (const [j, e] of assistant.chat()[i].edits.entries()) if (!e.applied && e.ok !== false) await assistant.applyEdit(i, j);
+  },
+  fill(i, j) {
+    const a = assistant.chat()[i].answers[j];
+    a.filled = fillAnswer(a.question_id, a.answer);
+    assistant.render();
+  },
+  fillAll(i) {
+    assistant.chat()[i].answers.forEach((a, j) => { if (!a.filled) assistant.fill(i, j); });
+    $("#h-questions").scrollIntoView({ behavior: "smooth" });
   },
   async ask(question, focus) {
     if (!state.run || assistant.busy || !question.trim()) return;
@@ -529,7 +663,8 @@ const assistant = {
     try {
       const f = assistant.focus ? { type: assistant.focus.type, id: assistant.focus.id } : null;
       const out = await api.assistant(state.run.id, question, history, f, settings.read());
-      msgs.push({ role: "assistant", content: out.answer, suggested: out.suggested_text, model: out.model });
+      msgs.push({ role: "assistant", content: out.answer, suggested: out.suggested_text, model: out.model,
+        edits: out.edits || [], answers: out.answers || [] });
     } catch (e) {
       msgs.push({ role: "assistant", content: e.message || String(e), error: true });
     }
@@ -537,9 +672,210 @@ const assistant = {
   },
 };
 
+// ---------- рабочая редакция документа ----------
+// Копия документа на сервере: правки помощника, правка вручную, отмена, проверка редакции как нового документа.
+
+const KIND_RU = { edit: "правка помощника", manual: "вручную", reset: "возврат к исходному" };
+
+const draft = {
+  view: null,
+  runId: null,
+  async load() {
+    draft.view = null;
+    draft.runId = state.run.id;
+    try { draft.view = await api.draft(state.run.id); } catch (e) { showError($("#draft-out"), e); }
+    draft.render();
+  },
+  render() {
+    const v = draft.view;
+    if (!v) return;
+    const n = v.edits.filter((e) => e.kind !== "reset").length;
+    $("#draft-status").textContent = v.changed
+      ? `Редакция отличается от исходного документа: правок ${n}. Исходный файл не меняется.`
+      : "Правок пока нет. Попросите помощника исправить нарушение или поправьте текст вручную; исходный файл не меняется.";
+    $("#draft-undo").disabled = !v.can_undo;
+    $("#draft-reset").hidden = !v.changed;
+    $("#draft-check").disabled = !v.changed;
+    $("#draft-download").href = `/api/runs/${encodeURIComponent(state.run.id)}/draft/file`;
+    $("#c-draft").textContent = v.edits.length || "";
+    $("#draft-log-box").hidden = !v.edits.length;
+    $("#draft-log").innerHTML = v.edits.slice().reverse().map((e) => `<div class="action">
+        <p class="action-head">${esc(new Date(e.at).toLocaleString("ru-RU"))} / ${esc(KIND_RU[e.kind] || e.kind)}${e.reason && e.kind === "edit" ? `: ${esc(e.reason)}` : ""}</p>
+        ${e.old ? `<del>${esc(e.old.slice(0, 600))}</del>` : ""}${e.new ? `<ins>${esc(e.new.slice(0, 600))}</ins>` : ""}
+      </div>`).join("");
+  },
+  async run(fn, msg) {
+    $("#draft-out").innerHTML = "";
+    try { draft.view = await fn(); draft.render(); if (msg) $("#draft-out").innerHTML = `<p class="ok small">${esc(msg)}</p>`; }
+    catch (e) { showError($("#draft-out"), e); }
+  },
+  edit() { $("#draft-text").value = draft.view?.text || ""; $("#draft-editor").hidden = false; $("#draft-text").focus(); },
+  async save() {
+    await draft.run(() => api.draftSave(state.run.id, $("#draft-text").value), "Сохранено");
+    $("#draft-editor").hidden = true;
+  },
+  async check() {
+    try {
+      const j = await api.draftCheck(state.run.id, { ...settings.read(), standards: null, fix: false });
+      state.comparePair = { before: state.run.id, job: j.id };
+      state.openLogs.add(j.id);
+      $("#draft-out").innerHTML = `<p class="ok small">Редакция поставлена на проверку. Когда она закончится, сравните результаты на странице «До и после».</p>`;
+      pollJobs();
+    } catch (e) { showError($("#draft-out"), e); }
+  },
+};
+
+// ---------- страница «Стандарты» ----------
+// Список стандартов с критериями, правка (встроенный сохраняется как изменённая копия), свои стандарты, импорт и черновик от ИИ.
+
+const KIND_SHORT = { modified: "изменён", custom: "свой" };
+const SCOPE_LABEL = { requirement: "каждое требование", set: "набор целиком" };
+
+const stdPage = {
+  list: [],
+  editing: null,   // {data, isNew, note}
+  async show() {
+    try { stdPage.list = await api.standards(); } catch (e) { showError($("#std-list"), e); return; }
+    state.status.standards = stdPage.list;
+    settings.renderStandards();
+    stdPage.renderList();
+    stdPage.renderEditor();
+  },
+  renderList() {
+    $("#std-list").innerHTML = stdPage.list.map((s) => `<details class="card std-card" data-sid="${esc(s.id)}">
+      <summary>
+        <span class="card-title">${esc(s.title)}</span>
+        <span class="card-meta">${s.criteria.length} ${plural(s.criteria.length, "критерий", "критерия", "критериев")}${s.mandatory ? " / обязательный" : ""}${s.default ? " / по умолчанию" : ""}${s.kind !== "builtin" ? ` / <b>${esc(KIND_SHORT[s.kind])}</b>` : ""}</span>
+      </summary>
+      <div class="card-body">
+        <p>${esc(s.description)}</p>
+        <p class="muted small">В отчёте: ${esc(s.cite)}</p>
+        ${table(s.criteria, [
+          ["name", "Критерий", (v, c) => `<b>${esc(v || "(дополняет базовый)")}</b><br><span class="muted small">${esc(c.code)}</span>`],
+          ["scope", "Что проверяет", (v, c) => `<span class="muted small">${esc(SCOPE_LABEL[v])}</span><br>${esc(c.question)}`],
+          ["source", "Пункт"],
+        ], "std-table")}
+        <p class="card-actions">
+          <button type="button" class="btn small" data-std-edit="${esc(s.id)}">Изменить</button>
+          <a class="btn small" href="/api/standards/${encodeURIComponent(s.id)}" download="${esc(s.id)}.json">Скачать JSON</a>
+          ${s.kind === "modified" ? `<button type="button" class="btn small" data-std-del="${esc(s.id)}" data-label="Вернуть исходный">Вернуть исходный</button>` : ""}
+          ${s.kind === "custom" ? `<button type="button" class="btn small" data-std-del="${esc(s.id)}" data-label="Удалить">Удалить</button>` : ""}
+        </p>
+      </div>
+    </details>`).join("");
+    $("#std-list").querySelectorAll("[data-std-edit]").forEach((b) => {
+      b.onclick = async () => {
+        try { stdPage.open(await api.call("GET", `/api/standards/${encodeURIComponent(b.dataset.stdEdit)}`), false); } catch (e) { showError($("#std-editor"), e); }
+      };
+    });
+    // удаление в два нажатия вместо модального окна
+    $("#std-list").querySelectorAll("[data-std-del]").forEach((b) => {
+      b.onclick = async () => {
+        if (!b.classList.contains("confirm")) { b.classList.add("confirm"); b.textContent = "Точно? Нажмите ещё раз"; return; }
+        try { await api.deleteStandard(b.dataset.stdDel); await stdPage.show(); } catch (e) { b.textContent = b.dataset.label; showError($("#std-editor"), e); }
+      };
+    });
+  },
+  open(data, isNew, note = "") {
+    stdPage.editing = { data: JSON.parse(JSON.stringify(data)), isNew, note };
+    stdPage.renderEditor();
+    $("#std-editor").scrollIntoView({ behavior: "smooth", block: "start" });
+  },
+  blank: () => ({ id: "", title: "", cite: "", description: "", order: 100,
+    criteria: [{ code: "", scope: "requirement", name: "", short: "", source: "", question: "" }] }),
+  renderEditor() {
+    const ed = stdPage.editing, el = $("#std-editor");
+    if (!ed) { el.innerHTML = ""; return; }
+    const d = ed.data;
+    const f = (k, label, attrs = "") => `<label class="field">${label} <input data-f="${k}" value="${esc(d[k] ?? "")}" ${attrs}></label>`;
+    el.innerHTML = `<div class="box std-editor">
+      <h2>${ed.isNew ? "Новый стандарт" : `Изменить: ${esc(d.title)}`}</h2>
+      ${ed.note ? `<p class="muted">${esc(ed.note)}</p>` : ""}
+      ${!ed.isNew && stdPage.list.find((s) => s.id === d.id)?.kind !== "custom" ? `<p class="muted small">Встроенный файл не меняется: изменённая копия сохранится в custom_standards/, исходный можно вернуть одной кнопкой.</p>` : ""}
+      <div class="grid2">
+        ${f("id", "Идентификатор (латиница, цифры, _)", ed.isNew ? 'placeholder="my_standard"' : "readonly")}
+        ${f("title", "Название", 'placeholder="Например: BABOK v3"')}
+        ${f("cite", "Ссылка в отчёте", 'placeholder="полное название, год, разделы"')}
+        ${f("order", "Порядок в списке", 'type="number" min="0" max="999"')}
+      </div>
+      <label class="field">Описание <input data-f="description" value="${esc(d.description || "")}"></label>
+      <h3>Критерии</h3>
+      <div id="std-crit">${d.criteria.map((c, i) => `<fieldset class="crit" data-i="${i}">
+        <legend>Критерий ${i + 1}</legend>
+        <div class="grid3">
+          <label class="field">Код <input data-c="code" value="${esc(c.code)}" placeholder="${c.scope === "set" ? "set_coverage" : "my_rule"}"></label>
+          <label class="field">Область <select data-c="scope">${Object.entries(SCOPE_LABEL).map(([k, l]) => `<option value="${k}" ${c.scope === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+          <label class="field">Короткое имя для таблицы <input data-c="short" value="${esc(c.short || "")}" maxlength="12"></label>
+        </div>
+        <div class="grid2">
+          <label class="field">Название <input data-c="name" value="${esc(c.name || "")}"></label>
+          <label class="field">Пункт стандарта <input data-c="source" value="${esc(c.source || "")}"></label>
+        </div>
+        <label class="field">Что проверяет агент <textarea data-c="question" rows="3">${esc(c.question || "")}</textarea></label>
+        <p class="card-actions"><button type="button" class="link" data-crit-del="${i}">Убрать критерий</button></p>
+      </fieldset>`).join("")}</div>
+      <p><button type="button" class="btn small" id="crit-add">Добавить критерий</button></p>
+      <div id="std-error"></div>
+      <div class="row actions">
+        <button type="button" class="btn primary" id="std-save">Сохранить</button>
+        <button type="button" class="btn" id="std-cancel">Отмена</button>
+      </div>
+    </div>`;
+    $("#crit-add").onclick = () => { stdPage.collect(); d.criteria.push({ code: "", scope: "requirement", name: "", short: "", source: "", question: "" }); stdPage.renderEditor(); };
+    el.querySelectorAll("[data-crit-del]").forEach((b) => { b.onclick = () => { stdPage.collect(); d.criteria.splice(Number(b.dataset.critDel), 1); stdPage.renderEditor(); }; });
+    $("#std-cancel").onclick = () => { stdPage.editing = null; stdPage.renderEditor(); };
+    $("#std-save").onclick = stdPage.save;
+  },
+  collect() {
+    const d = stdPage.editing.data;
+    $("#std-editor").querySelectorAll("[data-f]").forEach((i) => { d[i.dataset.f] = i.dataset.f === "order" ? Number(i.value || 100) : i.value.trim(); });
+    d.criteria = [...$("#std-editor").querySelectorAll("fieldset.crit")].map((fs) => {
+      const c = {};
+      fs.querySelectorAll("[data-c]").forEach((i) => { c[i.dataset.c] = i.value.trim(); });
+      return c;
+    });
+    return d;
+  },
+  async save() {
+    const ed = stdPage.editing, d = stdPage.collect();
+    try {
+      await api.saveStandard(d.id, d, ed.isNew);
+      stdPage.editing = null;
+      await stdPage.show();
+      const card = document.querySelector(`.std-card[data-sid="${CSS.escape(d.id)}"]`);
+      if (card) { card.open = true; card.scrollIntoView({ behavior: "smooth", block: "start" }); }
+    } catch (e) { showError($("#std-error"), e); }
+  },
+  async importFile() {
+    const file = $("#std-import").files[0];
+    $("#std-import").value = "";
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      const exists = stdPage.list.some((s) => s.id === data.id);
+      stdPage.open({ ...stdPage.blank(), ...data }, !exists, exists ? "Стандарт с таким идентификатором уже есть: при сохранении он будет заменён." : `Загружено из ${file.name}. Проверьте и сохраните.`);
+    } catch (e) { stdPage.open(stdPage.blank(), true); showError($("#std-error"), new Error(`Не удалось прочитать ${file.name}: это не JSON стандарта`)); }
+  },
+  async aiDraft() {
+    const text = $("#std-ai-text").value.trim();
+    if (text.length < 3) { $("#std-ai-out").textContent = "Вставьте текст или название стандарта"; return; }
+    $("#std-ai-run").disabled = true;
+    $("#std-ai-out").textContent = "Модель составляет черновик…";
+    try {
+      const d = await api.draftStandard(text, settings.read());
+      const model = d.model; delete d.model;
+      $("#std-ai-out").textContent = "";
+      stdPage.open(d, !stdPage.list.some((s) => s.id === d.id), `Черновик составила модель ${modelLabel(model)}. Проверьте пункты стандарта и формулировки перед сохранением.`);
+    } catch (e) { $("#std-ai-out").textContent = e.message; }
+    $("#std-ai-run").disabled = false;
+  },
+};
+
+const plural = (n, one, few, many) => (n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many);
+
 // ---------- страница «История» ----------
 
-const runLabel = (r) => `${new Date(r.started).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" })} / ${r.document}`;
+const runLabel = (r) => `${new Date(r.started).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" })} / ${docName(r.document)}`;
 
 async function showHistory() {
   const el = $("#history-table");
@@ -549,7 +885,7 @@ async function showHistory() {
     const when = (v) => (v ? new Date(v).toLocaleString("ru-RU") : "");
     el.innerHTML = table(runs, [
       ["started", "Проверка", (v, r) => (r.can_open ? `<a href="#/result/${esc(r.id)}">${esc(when(v))}</a>` : esc(when(v)))],
-      ["document", "Документ"],
+      ["document", "Документ", (v) => esc(docName(v))],
       ["status_label", "Статус", (v, r) => `<span class="st st-${esc(r.status)}">${esc(v)}</span>`
         + (r.error ? `<br><span class="muted small">${esc(r.error.slice(0, 160))}</span>` : "")],
       ["open_findings", "Нарушений", (v, r) => (r.can_open ? `${v} (критичных ${r.critical})` : "")],
@@ -578,6 +914,9 @@ async function showCompare() {
     const opts = runs.map((r) => `<option value="${esc(r.id)}">${esc(runLabel(r))}</option>`).join("");
     $("#cmp-before").innerHTML = opts; $("#cmp-after").innerHTML = opts;
     if (runs.length > 1) $("#cmp-before").selectedIndex = 1;
+    // после «Проверить редакцию»: исходная проверка «до», проверка редакции «после»
+    const pair = state.comparePair, j = pair && state.jobs.find((x) => x.id === pair.job);
+    if (j?.run_id && runs.some((r) => r.id === pair.before)) { $("#cmp-before").value = pair.before; $("#cmp-after").value = j.run_id; }
   } catch (e) { showError($("#compare-out"), e); }
 }
 
@@ -603,6 +942,7 @@ function route() {
   if (page === "result") showResult(arg && decodeURIComponent(arg)); else assistant.close();
   if (page === "history") showHistory();
   if (page === "compare") showCompare();
+  if (page === "standards") stdPage.show();
 }
 
 function applyTheme(dark) {
@@ -623,8 +963,21 @@ async function init() {
   $("#opt-key").oninput = (e) => { state.keys[settings.provider()] = e.target.value.trim(); settings.showKey(); };
   $("#opt-model").oninput = () => settings.showKey();
   $("#settings").addEventListener("change", (e) => { if (e.target.id !== "opt-provider") settings.read(); });
-  $("#sample-select").onchange = onSample;
-  $("#file-input").onchange = onFiles;
+  $("#file-input").onchange = () => { addFiles([...$("#file-input").files]); $("#file-input").value = ""; };
+  setupDrop();
+  $("#draft-edit").onclick = draft.edit;
+  $("#draft-save").onclick = draft.save;
+  $("#draft-cancel").onclick = () => { $("#draft-editor").hidden = true; };
+  $("#draft-undo").onclick = () => draft.run(() => api.draftUndo(state.run.id), "Последняя правка отменена");
+  $("#draft-reset").onclick = () => draft.run(() => api.draftReset(state.run.id), "Возвращён исходный текст (это можно отменить)");
+  $("#draft-check").onclick = draft.check;
+  $("#std-new").onclick = () => stdPage.open(stdPage.blank(), true);
+  $("#std-import").onchange = stdPage.importFile;
+  $("#std-ai-toggle").onclick = () => { $("#std-ai").hidden = !$("#std-ai").hidden; if (!$("#std-ai").hidden) $("#std-ai-text").focus(); };
+  $("#std-ai-run").onclick = stdPage.aiDraft;
+  $("#std-manage").onclick = () => { $("#settings").hidden = true; };
+  const navH = () => document.documentElement.style.setProperty("--nav-h", `${$(".navbar").offsetHeight}px`);
+  navH(); window.addEventListener("resize", navH);
   $("#btn-run").onclick = onRun;
   $("#btn-compare").onclick = onCompare;
   $("#f-text").oninput = (e) => { state.filter.text = e.target.value; state.filter.shown = 8; if (state.run) renderFindings(state.run); };
@@ -643,9 +996,6 @@ async function init() {
   state.status = await api.status();
   settings.load();
   if (!settings.providerInfo(settings.provider()).has_env_key) $("#settings").hidden = false;
-  $("#status-version").textContent = `Версия ${state.status.version}. Одновременно идут до ${state.status.max_parallel} проверок.`;
-  $("#footer-standards").textContent = "Стандарты: " + state.status.standards.map((s) => s.title).join(", ") + ".";
-  $("#sample-select").innerHTML += (await api.samples()).map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
   renderDocs();
   pollJobs();  // после перезагрузки страницы продолжаем следить за идущими проверками
   route();

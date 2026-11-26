@@ -36,8 +36,12 @@ REGISTRY = JobRegistry()
 async def fonts_cors(request, call_next):
     """Отчёт показывается в iframe с sandbox (чужой origin), а шрифты браузер грузит туда только с CORS."""
     response = await call_next(request)
-    if request.url.path.startswith("/static/fonts/"):
+    path = request.url.path
+    if path.startswith("/static/fonts/"):
         response.headers["Access-Control-Allow-Origin"] = "*"
+    elif path == "/" or path.startswith("/static/"):
+        # браузер сверяет файл с сервером при каждой загрузке (без изменений приходит 304): после обновления не нужен Ctrl+F5
+        response.headers["Cache-Control"] = "no-cache"
     return response
 
 
@@ -133,7 +137,62 @@ def status():
 
 @app.get("/api/standards")
 def standards():
+    """Все стандарты с критериями; kind: builtin, modified (встроенный изменён), custom (свой)."""
     return services.standards()
+
+
+@app.get("/api/standards/{sid}")
+def standard(sid: str):
+    """Действующий JSON стандарта (для правки и скачивания)."""
+    try:
+        return services.standard_raw(sid)
+    except services.NotFound as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@app.put("/api/standards/{sid}")
+def put_standard(sid: str, body: dict, create: bool = Query(False, description="создать новый: ошибка, если id занят")):
+    """Создать свой стандарт или изменить существующий (встроенный сохраняется как изменённая копия)."""
+    from validator.criteria import StandardError, available
+
+    if create and sid in available():
+        raise HTTPException(409, f"Стандарт с идентификатором {sid!r} уже есть")
+    try:
+        return services.save_standard(body, expected_id=sid)
+    except StandardError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.delete("/api/standards/{sid}")
+def delete_standard(sid: str):
+    """Свой стандарт удаляется, изменённый встроенный возвращается к исходному."""
+    from validator.criteria import StandardError
+
+    try:
+        return {"result": services.delete_standard(sid)}
+    except services.NotFound as e:
+        raise HTTPException(404, str(e)) from e
+    except StandardError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+class StandardDraftRequest(BaseModel):
+    text: str = Field(min_length=3, max_length=60000, description="Текст стандарта, выдержка или просто название")
+    options: Options = Options()
+
+
+@app.post("/api/standards/draft")
+def draft_standard(req: StandardDraftRequest, x_api_key: str | None = Header(None), x_gemini_key: str | None = Header(None)):
+    """Черновик стандарта с помощью модели (один запрос). Не сохраняется: его проверяет и сохраняет пользователь."""
+    from validator.llm import LLMError
+    from validator.redact import RedactionLeak
+
+    opts = _options(req.options, _key(x_api_key, x_gemini_key))
+    _need_key(opts)
+    try:
+        return services.draft_standard(req.text, opts)
+    except (LLMError, RedactionLeak) as e:
+        raise HTTPException(502, f"Модель не ответила: {e}") from e
 
 
 # ---------- документы ----------
@@ -298,6 +357,85 @@ def run_assistant(run_id: str, req: AssistantRequest, x_api_key: str | None = He
         return services.assistant(res, req.question, req.history, req.focus, opts)
     except (LLMError, RedactionLeak) as e:
         raise HTTPException(502, f"Помощник не ответил: {e}") from e
+
+
+# ---------- рабочая редакция документа ----------
+
+
+class DraftEdit(BaseModel):
+    old_text: str = Field("", max_length=20000, description="Фрагмент редакции; пусто: вставка после строки line")
+    new_text: str = Field(max_length=20000)
+    line: int = Field(0, ge=0)
+    reason: str = Field("", max_length=1000)
+
+
+class DraftText(BaseModel):
+    text: str = Field(max_length=2_000_000)
+
+
+class DraftCheck(BaseModel):
+    options: Options = Options()
+
+
+def _draft(fn, *args):
+    try:
+        return fn(*args)
+    except services.EditError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@app.get("/api/runs/{run_id}/draft")
+def get_draft(run_id: str):
+    """Рабочая редакция документа: текст, журнал правок. Пока её не правили, это исходный текст."""
+    return services.draft_view(_run(run_id))
+
+
+@app.post("/api/runs/{run_id}/draft/edit")
+def edit_draft(run_id: str, req: DraftEdit):
+    """Применить правку (из предложений помощника): заменить фрагмент или вставить текст после строки."""
+    return _draft(services.apply_edit, _run(run_id), req.old_text, req.new_text, req.line, req.reason)
+
+
+@app.put("/api/runs/{run_id}/draft")
+def put_draft(run_id: str, req: DraftText):
+    """Сохранить редакцию, исправленную вручную."""
+    return services.set_draft(_run(run_id), req.text)
+
+
+@app.post("/api/runs/{run_id}/draft/undo")
+def undo_draft(run_id: str):
+    return _draft(services.undo_draft, _run(run_id))
+
+
+@app.post("/api/runs/{run_id}/draft/reset")
+def reset_draft(run_id: str):
+    """Вернуть исходный текст (это тоже правка: её можно отменить)."""
+    return services.reset_draft(_run(run_id))
+
+
+@app.get("/api/runs/{run_id}/draft/file")
+def draft_file(run_id: str):
+    res = _run(run_id)
+    v = services.draft_view(res)
+    from urllib.parse import quote
+
+    return PlainTextResponse(v["text"], media_type="text/markdown; charset=utf-8",
+                             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(v['name'])}"})
+
+
+@app.post("/api/runs/{run_id}/draft/check", status_code=202)
+def check_draft(run_id: str, req: DraftCheck, x_api_key: str | None = Header(None),
+                x_gemini_key: str | None = Header(None)):
+    """Проверить рабочую редакцию как новый документ (по тем же стандартам), чтобы сравнить «до и после»."""
+    res = _run(run_id)
+    o = req.options
+    if not o.standards:
+        o.standards = res.prof.ids
+    opts = _options(o, _key(x_api_key, x_gemini_key))
+    _need_key(opts)
+    if not services.draft_view(res)["changed"]:
+        raise HTTPException(400, "Редакция совпадает с исходным документом: сначала внесите правки")
+    return _start(services.resolve_document(services.draft_upload(res)), opts)
 
 
 @app.get("/api/compare")

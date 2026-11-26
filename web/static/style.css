@@ -423,3 +423,60 @@ body.with-assistant main { margin-right: 380px; }
 .st-error, .st-running { color: var(--red); }
 .st-cancelled { color: var(--orange); }
 .st-active { color: var(--green-dk); }
+
+/* ---------- подвал прижат к низу страницы ---------- */
+body { display: flex; flex-direction: column; min-height: 100vh; }
+main { flex: 1 0 auto; width: 100%; }
+.footer { flex-shrink: 0; width: min(820px, calc(100% - 40px)); margin: 30px auto 0; padding: 12px 0 16px; }
+.footer .signature { margin-top: 2px; font: italic 14px var(--serif); color: var(--muted); }
+
+/* ---------- строка состояния: только пока идут проверки, прилипает под вкладками ---------- */
+.newsbar { position: sticky; top: var(--nav-h, 37px); z-index: 9; width: min(820px, calc(100% - 20px)); text-decoration: none; box-shadow: 0 2px 8px rgba(0, 0, 0, .12); }
+.newsbar:hover .news-text { text-decoration: underline; }
+.news-progress { display: flex; align-items: center; width: 170px; padding: 0 10px; border-left: 1px solid var(--rule-lt); }
+.news-progress .progress { width: 100%; height: 10px; margin: 0; }
+.progress span { transition: width .6s ease; }
+@media (max-width: 720px) { .news-progress { width: 80px; } }
+
+/* ---------- документы: выбор, перетаскивание, вставка ---------- */
+.drop-target { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px; border: 1px dashed var(--rule); border-radius: 8px; }
+#drop-zone.over .drop-target { border-color: var(--green-dk); background: var(--green-xlt); }
+
+/* ---------- действия помощника: правки документа и черновики ответов ---------- */
+.actions-block { margin-top: 10px; white-space: normal; }
+.actions-title { margin: 0 0 6px; font: bold 11.5px var(--sans); color: var(--ink-2); }
+.action { margin: 0 0 8px; padding: 8px 10px; border: 1px solid var(--rule-lt); border-radius: 6px; background: #fff; font-size: 15px; }
+.action.done { border-color: var(--green-lt); background: var(--green-xlt); }
+.action-head { margin: 0 0 4px; font: 11.5px/1.4 var(--sans); color: var(--muted); }
+.action p { margin: 0 0 4px; }
+.action del, .action ins { display: block; padding: 3px 6px; margin: 2px 0; border-radius: 4px; white-space: pre-wrap; text-decoration: none; }
+.action del { background: #fdecea; color: #7a2a24; }
+.action del::before { content: "было: "; font: bold 10.5px var(--sans); }
+.action ins { background: #e6f6ef; color: #0f4d36; }
+.action ins::before { content: "стало: "; font: bold 10.5px var(--sans); }
+.question.drafted { border-color: var(--gold); }
+
+/* ---------- рабочая редакция ---------- */
+.draft-actions { align-items: center; }
+#draft-text { width: 100%; font: 14px/1.5 ui-monospace, Consolas, monospace; padding: 8px; border: 1px solid #8f8f8f; border-radius: 4px; resize: vertical; }
+#draft-log .action { max-width: 900px; }
+
+/* ---------- стандарты ---------- */
+.std-toolbar { margin-bottom: 14px; }
+#std-ai textarea, .std-editor textarea { width: 100%; font: 16px var(--serif); padding: 6px 8px; border: 1px solid #8f8f8f; border-radius: 4px; resize: vertical; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 14px; }
+.crit { margin: 0 0 12px; padding: 6px 14px 4px; border: 1px solid var(--rule-lt); border-radius: 8px; }
+.crit legend { font: bold 12px var(--sans); color: var(--ink-2); padding: 0 6px; }
+.std-table td:first-child { width: 26%; }
+.std-table td:last-child { width: 18%; font-size: 14px; color: var(--ink-2); }
+.btn.confirm { border-color: var(--red); color: var(--red); }
+@media (max-width: 720px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
+
+[data-theme="dark"] .footer .signature { color: var(--on-dark-muted); }
+[data-theme="dark"] :is(.std-toolbar, .draft-actions) .link { color: var(--link-on-dark); }
+[data-theme="dark"] #draft-section > p.muted { color: var(--on-dark-muted); }
+.std-card > summary { grid-template-columns: minmax(0, 1fr) auto; }
+.std-card .card-title, .std-card .card-meta { grid-column: 1; }
+.std-card > summary::after { grid-column: 2; }
+.std-card .card-meta b { color: var(--green-dk); }
