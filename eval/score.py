@@ -1,6 +1,6 @@
-"""Оценка прогона по эталонному списку дефектов.
+"""Оценка проверки по эталонному списку дефектов.
 
-    python eval/score.py runs/<прогон>/result.json [eval/gold.json]
+    python eval/score.py runs/<проверка>/result.json [eval/gold.json]
 
 Полнота (recall): какая доля эталонных дефектов найдена подтверждёнными
 находками агента. Находки, не совпавшие ни с одним эталонным дефектом,
@@ -63,7 +63,7 @@ def main() -> int:
     total = len(gold["defects"])
     core = [d for d in gold["defects"] if d["core"]]
     core_found = [d for d, _ in found if d["core"]]
-    print(f"Документ: {doc.path.name}; прогон: {sys.argv[1]}; модель: {result.get('model')}")
+    print(f"Документ: {doc.path.name}; проверка: {sys.argv[1]}; модель: {result.get('model')}")
     print(f"Полнота: {len(found)}/{total} = {len(found) / total:.0%}; по ключевым (core): "
           f"{len(core_found)}/{len(core)} = {len(core_found) / len(core):.0%}")
     print(f"Подтверждённых находок: {len(kept)} (уникальных {sum(1 for f in kept if not f['duplicate_of'])}); "

@@ -1,4 +1,4 @@
-"""Логика веб-интерфейса без привязки к фреймворку: документы, прогоны, история, ответы, сравнение.
+"""Логика веб-интерфейса без привязки к фреймворку: документы, проверки, история, ответы, сравнение.
 
 API (web/api.py) только переводит эти функции в HTTP, поэтому фронтенд можно
 переделать как угодно, не трогая работу с конвейером.
@@ -139,7 +139,7 @@ def make_config(o: RunOptions) -> Config:
 
 
 def mask_preview(doc_id: str, o: RunOptions) -> dict:
-    """Сухой прогон: что уйдёт в модель."""
+    """Сухая проверка: что уйдёт в модель."""
     res = pipeline.run(str(resolve_document(doc_id)), make_config(o), log=lambda *_: None, dry_run=True)
     masked = (res.audit_dir / "masked_input.md").read_text(encoding="utf-8")
     rows = [{"placeholder": ph, "kind": ph.strip("[]").rsplit("_", 1)[0], "value": _shorten(v)}
@@ -155,7 +155,7 @@ def _shorten(v: str) -> str:
     return v if len(v) <= 4 else v[:2] + "…" + v[-2:]
 
 
-# ---------- прогоны ----------
+# ---------- проверки ----------
 
 
 def _runs_dir() -> Path:
@@ -309,7 +309,7 @@ def write_answers(res, answers: dict[str, str]) -> Path:
     return p
 
 
-# ---------- сравнение двух прогонов ----------
+# ---------- сравнение двух проверок ----------
 
 
 def _open_json(r: dict) -> list[dict]:

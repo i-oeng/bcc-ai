@@ -1,4 +1,4 @@
-"""Веб-API без сети: документы, маскирование, прогон с поддельной моделью, ответы, история, сравнение."""
+"""Веб-API без сети: документы, маскирование, проверка с поддельной моделью, ответы, история, сравнение."""
 
 import threading
 import time
@@ -32,7 +32,7 @@ def _wait(client, jid):
             assert j["status"] == "done", j
             return j
         time.sleep(0.1)
-    raise AssertionError("прогон не закончился")
+    raise AssertionError("проверка не закончилась")
 
 
 def test_status_samples_and_frontend(client):

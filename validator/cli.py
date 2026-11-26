@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--parallel", type=int, help="сколько запросов к модели идут одновременно (по умолчанию 6)")
     ap.add_argument("--batch-size", type=int, help="сколько требований проверять за один запрос (по умолчанию 12)")
     ap.add_argument("--no-redact", action="store_true", help="не маскировать чувствительные данные (не рекомендуется)")
-    ap.add_argument("--no-cache", action="store_true", help="не брать ответы модели из кэша (полностью новый прогон)")
+    ap.add_argument("--no-cache", action="store_true", help="не брать ответы модели из кэша (полностью новая проверка)")
     ap.add_argument("--answers", metavar="FILE",
                     help="файл вопросов с ответами заказчика (<отчёт>_questions.md): агент закроет дефекты, которые ответы устраняют")
     ap.add_argument("--fix", action="store_true",

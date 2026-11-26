@@ -30,20 +30,27 @@
   <aside id="settings" class="sheet" hidden>
     <div class="sheet-head"><h2>Настройки</h2><button type="button" class="sheet-close" id="settings-close" aria-label="Закрыть">×</button></div>
     <fieldset>
-      <legend>Прогон</legend>
+      <legend>Модель</legend>
+      <label class="field">Провайдер <select id="opt-provider"></select></label>
+      <label class="field">Ключ API для этой вкладки <input id="opt-key" type="password" autocomplete="off" placeholder="не нужен, если ключ есть в .env"></label>
+      <p id="key-status" class="muted small"></p>
+      <label class="field" id="base-url-field" hidden>Адрес сервера (OpenRouter, DeepSeek, Groq, vLLM, Ollama) <input id="opt-base-url" placeholder="https://openrouter.ai/api/v1"></label>
       <label class="field">Основная модель <input id="opt-model"></label>
       <label class="field">Запасные модели (через запятую) <input id="opt-fallbacks"></label>
-      <label class="field">Требований за запрос <input id="opt-batch" type="number" min="1" max="40"></label>
+    </fieldset>
+    <fieldset>
+      <legend>Стандарты</legend>
+      <div id="opt-standards"></div>
+    </fieldset>
+    <fieldset>
+      <legend>Скорость и данные</legend>
+      <label class="field">Требований за один запрос <input id="opt-batch" type="number" min="1" max="40"></label>
+      <label class="field">Одновременных запросов к модели <input id="opt-parallel" type="number" min="1" max="16"></label>
       <label class="check"><input id="opt-redact" type="checkbox"> Маскировать чувствительные данные</label>
       <label class="check"><input id="opt-ner" type="checkbox"> Искать ФИО (NER)</label>
       <label class="check"><input id="opt-cache" type="checkbox"> Брать готовые ответы из кэша</label>
     </fieldset>
-    <fieldset>
-      <legend>Ключ Gemini API</legend>
-      <p id="key-status" class="muted"></p>
-      <label class="field">Ключ для этой вкладки <input id="opt-key" type="password" autocomplete="off"></label>
-      <p class="muted small">Хранится только в памяти страницы. Получить: aistudio.google.com/apikey</p>
-    </fieldset>
+    <p class="muted small">Ключ хранится только в памяти страницы и передаётся серверу при запуске проверки.</p>
   </aside>
 
   <main>
@@ -51,27 +58,29 @@
       <h1 class="hero">Проверка требований.</h1>
       <p class="tagline">Агент находит противоречия, пробелы и непроверяемые формулировки и привязывает каждое нарушение к строке документа.</p>
       <div class="box">
-        <h2>Документ</h2>
+        <h2>Документы</h2>
         <div class="row">
-          <label class="field inline">Пример <select id="sample-select"><option value="">(выберите)</option></select></label>
+          <label class="field inline">Пример <select id="sample-select"><option value="">(добавить пример)</option></select></label>
           <span class="muted">или</span>
-          <label class="field inline">Свой файл <input id="file-input" type="file" accept=".pdf,.docx,.md,.txt,.html,.htm"></label>
+          <label class="field inline">Свои файлы <input id="file-input" type="file" multiple accept=".pdf,.docx,.md,.txt,.html,.htm"></label>
         </div>
-        <div id="doc-info"></div>
+        <div id="doc-list"></div>
         <label class="check"><input id="opt-fix" type="checkbox"> Сформировать исправленную редакцию документа</label>
         <div class="row actions">
-          <button id="btn-preview" type="button" class="btn" disabled>Что уйдёт в модель</button>
-          <button id="btn-run" type="button" class="btn primary" disabled>Запустить проверку</button>
+          <button id="btn-run" type="button" class="btn primary" disabled>Проверить</button>
         </div>
       </div>
       <div id="preview"></div>
-      <div id="job"></div>
+      <div class="box" id="jobs-box" hidden>
+        <h2>Проверки</h2>
+        <div id="jobs"></div>
+      </div>
     </section>
 
     <section id="view-result" class="view" hidden>
       <h1 class="hero" id="res-title">Результат.</h1>
       <p id="res-meta" class="tagline"></p>
-      <div id="res-empty" class="box empty">Результата пока нет: запустите проверку или откройте прогон в «Истории».</div>
+      <div id="res-empty" class="box empty">Результата пока нет: запустите проверку или откройте прошлую в «Истории».</div>
       <div id="res-body" hidden>
         <nav class="tabs" id="res-tabs">
           <button data-tab="overview" class="active">Кратко</button>
@@ -105,13 +114,13 @@
 
     <section id="view-history" class="view" hidden>
       <h1 class="hero">История.</h1>
-      <p class="tagline">Прошлые прогоны открываются без новых запросов к модели.</p>
+      <p class="tagline">Прошлые проверки открываются без новых запросов к модели.</p>
       <div class="box"><div id="history-table"></div></div>
     </section>
 
     <section id="view-compare" class="view" hidden>
       <h1 class="hero">До и после.</h1>
-      <p class="tagline">Сравнение двух прогонов: исходный документ и его исправленная редакция.</p>
+      <p class="tagline">Сравнение двух проверок: исходный документ и его исправленная редакция.</p>
       <div class="box">
         <div class="row">
           <label class="field inline">До <select id="cmp-before"></select></label>
@@ -125,7 +134,8 @@
 
   <footer class="footer">
     <p><a href="#/check">Проверка</a> | <a href="#/history">История</a> | <a href="/docs" target="_blank" rel="noopener">Документация API</a></p>
-    <p>Проверка по ISO/IEC/IEEE 29148 и IEEE 830. <span id="status-version"></span></p>
+    <p id="footer-standards"></p>
+    <p id="status-version"></p>
   </footer>
 
   <script src="static/app.js"></script>

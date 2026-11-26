@@ -306,7 +306,7 @@ def run(
     kept = res.kept()
     _reconcile_verdicts(res)
 
-    # 7в. ответы заказчика на вопросы прошлого прогона
+    # 7в. ответы заказчика на вопросы прошлой проверки
     answers_txt = "(ответов пока нет)"
     if answers_path:
         from .clarify import parse_answers, qa_block
@@ -375,7 +375,7 @@ def run(
 
 
 def save_state(res: RunResult, path: Path) -> None:
-    """Полное состояние прогона, чтобы перерисовать отчёт без запросов к модели (--rerender).
+    """Полное состояние проверки, чтобы перерисовать отчёт без запросов к модели (--rerender).
 
     Внутри таблица маскирования с исходными значениями, поэтому файл остаётся только
     в локальной папке runs/ (она в .gitignore), как и сам исходный документ.
@@ -401,7 +401,7 @@ def load_state(run_dir: str | Path) -> RunResult:
 
 
 def save_json(res: RunResult, path: Path) -> None:
-    """Структурированный результат прогона (без расшифровки маскирования)."""
+    """Структурированный результат проверки (без расшифровки маскирования)."""
     import json
 
     def anchor(a: Anchor) -> dict:

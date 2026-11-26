@@ -1,4 +1,4 @@
-"""Сквозной прогон конвейера с поддельной моделью: проверяем склейку шагов и отчёт без сети."""
+"""Сквозная проверка конвейера с поддельной моделью: проверяем склейку шагов и отчёт без сети."""
 
 from pathlib import Path
 
@@ -153,7 +153,7 @@ def test_final_step_failure_still_writes_report(tmp_path):
 
 
 def test_answers_loop_and_fixed_document(tmp_path, monkeypatch):
-    """Прогон, файл вопросов, ответ заказчика, повторный прогон: дефект закрыт, итог пересчитан."""
+    """Проверка, файл вопросов, ответ заказчика, повторная проверка: дефект закрыт, итог пересчитан."""
     monkeypatch.setattr(pipeline, "DEDUPE_THRESHOLD", 1)
     cfg = Config.load(runs_dir=str(tmp_path / "runs"), redact_ner=False)
     first = pipeline.run(str(SAMPLE), cfg, log=lambda *_: None, client_factory=lambda red, audit: FakeClient(red))
