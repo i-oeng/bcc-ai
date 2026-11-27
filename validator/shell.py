@@ -116,6 +116,25 @@ def md(s: str) -> str:
     return re.sub(r"`([^`]+)`", lambda m: cyan(m.group(1)), s)
 
 
+def short_path(p: Path, n: int) -> str:
+    """Путь коротко: домашняя папка как ~, длинная середина как …"""
+    s = str(p)
+    home = str(Path.home())
+    if s.lower().startswith(home.lower()):
+        s = "~" + s[len(home):]
+    if len(s) <= n:
+        return s
+    sep = "\\" if "\\" in s else "/"
+    parts = s.split(sep)
+    head, tail = parts[0], parts[-1]
+    out = tail
+    for part in reversed(parts[1:-1]):  # добавляем папки с конца, пока помещается
+        if len(head) + len(part) + len(out) + 4 > n:
+            break
+        out = part + sep + out
+    return f"{head}{sep}…{sep}{out}" if out != sep.join(parts[1:]) else s
+
+
 def clip(s: str, n: int) -> str:
     s = " ".join((s or "").split())
     if len(s) <= n:
@@ -280,11 +299,18 @@ class Shell:
         print()
 
     def context(self) -> str:
+        """Строка над вводом: папка, открытый документ, модель."""
+        m = self.cfg.model
+        known = {"gemini": ("gemini", "gemma"), "anthropic": ("claude",), "openai": ("gpt", "o1", "o3", "o4")}
+        model = m if m.lower().startswith(known.get(self.cfg.provider, ())) else f"{self.cfg.provider} {m}"
         if not self.res:
-            return f"{self.cfg.model} / документ не открыт"
-        op = self.res.open_findings()
-        crit = sum(f.severity == "critical" for f in op)
-        return f"{clip(self.res.doc.title, 40)} / {len(op)} нарушений, {crit} крит. / {self.cfg.model}"
+            doc = "документ не открыт"
+        else:
+            op = self.res.open_findings()
+            crit = sum(f.severity == "critical" for f in op)
+            doc = f"{clip(self.res.doc.path.name, 32)}: {len(op)} нарушений, {crit} крит."
+        room = width() - 12 - len(doc) - len(model)
+        return f"{short_path(Path.cwd(), max(16, room))} / {doc} / {model}"
 
     def loop(self) -> int:
         self.banner()
