@@ -115,14 +115,14 @@ const settings = {
   showKey() {
     const p = settings.providerInfo(settings.provider());
     const own = !!state.keys[p.id];
-    $("#key-status").textContent = own ? "Используется ключ из этого поля." : p.has_env_key ? "Ключ найден в .env." : "В .env ключа нет: впишите его здесь.";
+    $("#key-status").textContent = own ? "Используется этот ключ; он хранится только в памяти вкладки." : p.has_env_key ? "На сервере есть ключ." : "На сервере ключа нет: впишите свой.";
   },
   renderStandards(chosen) {
     chosen ||= settings.saved().standards || state.status.defaults.standards;
     $("#opt-standards").innerHTML = state.status.standards.map((s) => `
       <label class="check std" title="${esc(s.description)}">
         <input type="checkbox" value="${esc(s.id)}" ${s.mandatory ? "checked disabled" : chosen.includes(s.id) ? "checked" : ""}>
-        <span><b>${esc(s.title)}</b>${s.mandatory ? " (всегда)" : ""}${s.kind === "custom" ? " (свой)" : s.kind === "modified" ? " (изменён)" : ""}<br><span class="muted small">${esc(s.description)}</span></span>
+        <span>${esc(s.title)}${s.mandatory ? ` <span class="muted">(всегда)</span>` : ""}${s.kind === "custom" ? ` <span class="muted">(свой)</span>` : s.kind === "modified" ? ` <span class="muted">(изменён)</span>` : ""}</span>
       </label>`).join("");
   },
   read() {
@@ -156,8 +156,6 @@ function table(rows, cols, cls = "") {
   return `<table class="${cls}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
-// строка показателей без рамок: [подпись, значение, необязательный класс critical|major|minor]
-const figures = (items) => `<dl class="figures">${items.map(([label, value, cls]) => `<div class="${cls || ""}"><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>`;
 const win = (title, body) => `<div class="box"><h2>${esc(title)}</h2>${body}</div>`;
 const showError = (el, e) => { el.innerHTML = `<p class="error">${esc(e.message || e)}</p>`; };
 const fmtTime = (s) => (s >= 60 ? `${Math.floor(s / 60)} мин ${Math.round(s % 60)} с` : `${Math.round(s)} с`);
@@ -171,7 +169,7 @@ function addDoc(info) {
 
 function renderDocs() {
   const el = $("#doc-list");
-  $("#btn-run").disabled = !state.docs.length;
+  $("#run-row").hidden = !state.docs.length;
   $("#btn-run").textContent = state.docs.length > 1 ? `Проверить все (${state.docs.length})` : "Проверить";
   if (!state.docs.length) { el.innerHTML = ""; return; }
   el.innerHTML = table(state.docs, [
@@ -365,9 +363,9 @@ async function showResult(runId) {
   }
   const r = state.run;
   $("#res-title").textContent = r.document.title || docName(r.document.name);
-  $("#res-meta").textContent = `${docName(r.document.name)} / проверка от ${new Date(r.started).toLocaleString("ru-RU")}`
-    + (r.elapsed ? ` / ${fmtTime(r.elapsed)}` : "") + ` / ${r.standards.map((x) => x.title).join(", ")}`;
-  const files = [["report", "отчёт"], ["questions", "вопросы"], ...(r.has_fixed ? [["fixed", "исправленная редакция"]] : []), ["result", "структурированный результат"]];
+  $("#tab-result").hidden = false;
+  $("#res-meta").textContent = `${docName(r.document.name)} / ${new Date(r.started).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" })}`;
+  const files = [["report", "отчёт"], ["questions", "вопросы"], ...(r.has_fixed ? [["fixed", "исправленная редакция"]] : []), ["result", "JSON"]];
   $("#res-files").innerHTML = "Скачать: " + files.map(([k, l]) => `<a href="${api.fileUrl(r.id, k)}">${esc(l)}</a>`).join(" / ");
   renderVerdict(r); renderSevFilter(r); renderFindings(r); renderQuestions(r); renderMore(r);
   if (draft.runId !== r.id) { $("#draft-editor").hidden = true; $("#draft-out").innerHTML = ""; await draft.load(); }
@@ -389,9 +387,7 @@ function renderVerdict(r) {
   $("#res-verdict").innerHTML = `
     <div class="verdict-main">
       <p class="verdict-line">Разработку начинать <b>${esc(word)}</b>. Тесты проектировать <b class="${tcls}">${esc(tword)}</b>.</p>
-      <p class="muted">${esc(d.development_rationale || d.development)}</p>
-      ${figures([["открытых нарушений", s.open], ["критичных", s.critical, "critical"], ["существенных", s.major, "major"],
-                 ["незначительных", s.minor, "minor"], ["вопросов", s.questions], ...(s.closed ? [["закрыто ответами", s.closed]] : [])])}
+      <p class="muted">${esc(d.development_rationale || d.development)}${s.closed ? ` Закрыто ответами: ${s.closed}.` : ""}</p>
     </div>
     ${fix.length ? `<div class="verdict-fix">
       <h3>Исправить в первую очередь</h3>
@@ -419,6 +415,7 @@ function renderFindings(r) {
     .sort((a, b) => (a.status === "closed") - (b.status === "closed") || SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity));
   const shown = rows.slice(0, state.filter.shown);
   const el = $("#findings-list");
+  $("#f-text").hidden = r.findings.length <= PAGE && !q;
   if (!rows.length) { el.innerHTML = `<p class="muted">Ничего не найдено.</p>`; return; }
   el.innerHTML = shown.map((f) => {
     const where = f.anchors[0] ? f.anchors[0].where.replace(/, раздел.*$/, "") : "";
@@ -438,9 +435,8 @@ function renderFindings(r) {
           ${f.resolution_note ? `<dt>Ответ заказчика</dt><dd>${esc(f.resolution_note)}</dd>` : ""}
         </dl>
         <p class="card-actions">
+          <button type="button" class="btn small" data-ask="rewrite">Исправить в документе</button>
           <button type="button" class="btn small" data-ask="explain">Объяснить</button>
-          <button type="button" class="btn small" data-ask="rewrite">Предложить формулировку</button>
-          <button type="button" class="btn small" data-ask="split">Разбить на требования</button>
         </p>
       </div>
     </details>`;
@@ -478,19 +474,14 @@ function renderQuestions(r) {
           ${opts.map((o) => `<label><input type="radio" name="q-${esc(q.id)}" value="${esc(o)}" ${prev[q.id] === o ? "checked" : ""}> ${esc(o)}</label>`).join("")}
           <label><input type="radio" name="q-${esc(q.id)}" value="__own" ${own ? "checked" : ""}> Свой ответ: <input class="own" value="${esc(own)}" aria-label="Свой ответ"></label>
         </fieldset>
-        <p class="card-actions"><button type="button" class="btn small" data-askq="${esc(q.id)}">Черновик ответа от помощника</button></p>
       </div>
     </details>`;
   }).join("")
     + `<div class="row actions"><label class="check"><input id="ans-fix" type="checkbox" checked> Сформировать исправленную редакцию</label>
-       <button id="btn-answers-ai" class="btn" type="button">Черновики ответов от помощника</button>
+       <button id="btn-answers-ai" class="btn" type="button">Черновики от помощника</button>
        <button id="btn-answers" class="btn primary" type="button">Перепроверить с ответами</button></div><div id="answers-out"></div>`;
   $("#btn-answers").onclick = onAnswers;
   $("#btn-answers-ai").onclick = () => assistant.ask(QUICK.answers_all, null);
-  el.querySelectorAll("[data-askq]").forEach((b) => {
-    b.onclick = () => assistant.ask(QUICK.answer_one,
-      { type: "question", id: b.dataset.askq, label: `${b.dataset.askq}: ${r.questions[Number(b.dataset.askq.replace(/\D/g, "")) - 1].question}` });
-  });
 }
 
 // Черновик ответа от помощника: выбрать совпадающий вариант или вписать свой ответ. Отправляет ответы только пользователь.
@@ -583,7 +574,7 @@ const assistant = {
       $("#focus-clear").onclick = () => assistant.setFocus(null);
     }
     const msgs = assistant.chat();
-    $("#chat").innerHTML = (msgs.length ? "" : `<p class="muted chat-empty">Помощник объясняет нарушения, предлагает правки документа и черновики ответов заказчику. Правки попадают в рабочую редакцию только по вашей кнопке.</p>`)
+    $("#chat").innerHTML = (msgs.length ? "" : `<p class="muted chat-empty">Объясняет нарушения, предлагает правки документа и черновики ответов заказчику. Правки применяются только по вашей кнопке; проверяйте ответы модели.</p>`)
       + msgs.map((m, i) => m.role === "user"
         ? `<div class="msg user">${esc(m.content)}</div>`
         : `<div class="msg bot ${m.error ? "err" : ""}">${esc(m.content)}${m.suggested ? `<div class="suggested"><pre>${esc(m.suggested)}</pre><button type="button" class="btn small" data-copy="${i}">Скопировать</button></div>` : ""}${assistant.actions(m, i)}${m.model ? `<span class="msg-meta">${esc(modelLabel(m.model))}</span>` : ""}</div>`).join("")
@@ -691,11 +682,13 @@ const draft = {
     if (!v) return;
     const n = v.edits.filter((e) => e.kind !== "reset").length;
     $("#draft-status").textContent = v.changed
-      ? `Редакция отличается от исходного документа: правок ${n}. Исходный файл не меняется.`
-      : "Правок пока нет. Попросите помощника исправить нарушение или поправьте текст вручную; исходный файл не меняется.";
-    $("#draft-undo").disabled = !v.can_undo;
+      ? `Правок: ${n}. Исходный файл не меняется.`
+      : "Правок пока нет. Нажмите «Исправить в документе» у нарушения или поправьте текст вручную.";
+    // без правок остаётся одна кнопка: недоступные действия скрыты, а не выключены
+    $("#draft-undo").hidden = !v.can_undo;
     $("#draft-reset").hidden = !v.changed;
-    $("#draft-check").disabled = !v.changed;
+    $("#draft-check").hidden = !v.changed;
+    $("#draft-download").hidden = !v.changed;
     $("#draft-download").href = `/api/runs/${encodeURIComponent(state.run.id)}/draft/file`;
     $("#c-draft").textContent = v.edits.length || "";
     $("#draft-log-box").hidden = !v.edits.length;
@@ -719,7 +712,7 @@ const draft = {
       const j = await api.draftCheck(state.run.id, { ...settings.read(), standards: null, fix: false });
       state.comparePair = { before: state.run.id, job: j.id };
       state.openLogs.add(j.id);
-      $("#draft-out").innerHTML = `<p class="ok small">Редакция поставлена на проверку. Когда она закончится, сравните результаты на странице «До и после».</p>`;
+      $("#draft-out").innerHTML = `<p class="ok small">Редакция поставлена на проверку. Когда она закончится, <a href="#/compare">сравните до и после</a>.</p>`;
       pollJobs();
     } catch (e) { showError($("#draft-out"), e); }
   },
@@ -882,17 +875,21 @@ async function showHistory() {
   el.textContent = "Загружаю…";
   try {
     const runs = await api.call("GET", "/api/runs?all=true");
-    const when = (v) => (v ? new Date(v).toLocaleString("ru-RU") : "");
+    const when = (v) => (v ? new Date(v).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" }) : "");
+    $("#history-compare").hidden = runs.filter((r) => r.can_open).length < 2;
+    if (!runs.length) { el.innerHTML = `<p class="muted center">Проверок пока нет.</p>`; return; }
+    // готовая проверка: число нарушений и итог; незавершённая: статус, причина и «Повторить»
     el.innerHTML = table(runs, [
-      ["started", "Проверка", (v, r) => (r.can_open ? `<a href="#/result/${esc(r.id)}">${esc(when(v))}</a>` : esc(when(v)))],
+      ["started", "Дата", (v, r) => `<span class="nowrap">${r.can_open ? `<a href="#/result/${esc(r.id)}">${esc(when(v))}</a>` : esc(when(v))}</span>`],
       ["document", "Документ", (v) => esc(docName(v))],
-      ["status_label", "Статус", (v, r) => `<span class="st st-${esc(r.status)}">${esc(v)}</span>`
-        + (r.error ? `<br><span class="muted small">${esc(r.error.slice(0, 160))}</span>` : "")],
-      ["open_findings", "Нарушений", (v, r) => (r.can_open ? `${v} (критичных ${r.critical})` : "")],
-      ["development", "", (v, r) => (r.can_retry
-        ? `<button type="button" class="btn small" data-retry="${esc(r.id)}">Повторить</button>`
-        : esc(v || ""))],
-    ]);
+      ["open_findings", "Нарушений", (v, r) => (r.can_open ? `<span class="nowrap">${v}${r.critical ? `, <span class="sev-critical">критичных ${r.critical}</span>` : ""}</span>` : "")],
+      ["development", "Итог", (v, r) => {
+        if (r.can_open) { const [cls, word] = verdictWord(v); return `<span class="verdict-word ${cls}">${esc(word === "можно" ? "можно начинать" : word === "нельзя" ? "нельзя начинать" : word)}</span>`; }
+        return `<span class="st st-${esc(r.status)}">${esc(r.status_label)}</span>`
+          + (r.error ? `<br><span class="muted small">${esc(r.error.slice(0, 160))}</span>` : "")
+          + (r.can_retry ? ` <button type="button" class="btn small" data-retry="${esc(r.id)}">Повторить</button>` : "");
+      }],
+    ], "history");
     el.querySelectorAll("[data-retry]").forEach((b) => {
       b.onclick = async () => {
         b.disabled = true;
@@ -949,7 +946,8 @@ function applyTheme(dark) {
   if (dark) document.documentElement.dataset.theme = "dark";
   else delete document.documentElement.dataset.theme;
   const b = $("#theme-toggle");
-  b.textContent = dark ? "Светлая тема" : "Тёмная тема";
+  b.title = dark ? "Светлая тема" : "Тёмная тема";
+  b.setAttribute("aria-label", "Тёмная тема");
   b.setAttribute("aria-pressed", String(dark));
   try { localStorage.setItem("validator.theme", dark ? "dark" : "light"); } catch (e) { /* без сохранения */ }
 }
@@ -957,8 +955,13 @@ function applyTheme(dark) {
 async function init() {
   applyTheme(document.documentElement.dataset.theme === "dark");
   $("#theme-toggle").onclick = () => applyTheme(document.documentElement.dataset.theme !== "dark");
-  $("#settings-toggle").onclick = () => { $("#settings").hidden = !$("#settings").hidden; };
-  $("#settings-close").onclick = () => { $("#settings").hidden = true; };
+  const showSettings = (on) => { $("#settings").hidden = !on; $("#settings-toggle").setAttribute("aria-expanded", String(on)); };
+  $("#settings-toggle").onclick = () => showSettings($("#settings").hidden);
+  $("#settings-close").onclick = () => showSettings(false);
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (!$("#settings").hidden) showSettings(false); else if (!$("#assistant").hidden) assistant.close();
+  });
   $("#opt-provider").onchange = () => { settings.fillProvider(settings.saved().perProvider?.[settings.provider()]); settings.read(); };
   $("#opt-key").oninput = (e) => { state.keys[settings.provider()] = e.target.value.trim(); settings.showKey(); };
   $("#opt-model").oninput = () => settings.showKey();
@@ -975,7 +978,7 @@ async function init() {
   $("#std-import").onchange = stdPage.importFile;
   $("#std-ai-toggle").onclick = () => { $("#std-ai").hidden = !$("#std-ai").hidden; if (!$("#std-ai").hidden) $("#std-ai-text").focus(); };
   $("#std-ai-run").onclick = stdPage.aiDraft;
-  $("#std-manage").onclick = () => { $("#settings").hidden = true; };
+  $("#std-manage").onclick = () => showSettings(false);
   const navH = () => document.documentElement.style.setProperty("--nav-h", `${$(".navbar").offsetHeight}px`);
   navH(); window.addEventListener("resize", navH);
   $("#btn-run").onclick = onRun;
@@ -995,7 +998,7 @@ async function init() {
 
   state.status = await api.status();
   settings.load();
-  if (!settings.providerInfo(settings.provider()).has_env_key) $("#settings").hidden = false;
+  if (!settings.providerInfo(settings.provider()).has_env_key) showSettings(true);
   renderDocs();
   pollJobs();  // после перезагрузки страницы продолжаем следить за идущими проверками
   route();

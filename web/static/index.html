@@ -14,12 +14,11 @@
   <header class="navbar">
     <nav class="toptabs">
       <a href="#/check" data-route="check">Проверка</a>
-      <a href="#/result" data-route="result">Результат</a>
+      <a href="#/result" data-route="result" id="tab-result" hidden>Результат</a>
       <a href="#/history" data-route="history">История</a>
-      <a href="#/compare" data-route="compare">До и после</a>
       <a href="#/standards" data-route="standards">Стандарты</a>
-      <button id="settings-toggle" type="button">Настройки</button>
-      <button id="theme-toggle" type="button" aria-pressed="false">Тёмная тема</button>
+      <button id="settings-toggle" type="button" aria-controls="settings" aria-expanded="false">Настройки</button>
+      <button id="theme-toggle" type="button" aria-pressed="false" aria-label="Тёмная тема" title="Тёмная тема"><svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg></button>
     </nav>
   </header>
 
@@ -35,7 +34,7 @@
     <fieldset>
       <legend>Модель</legend>
       <label class="field">Провайдер <select id="opt-provider"></select></label>
-      <label class="field">Ключ доступа к модели (только для этой вкладки) <input id="opt-key" type="password" autocomplete="off" placeholder="не нужен, если ключ есть в .env"></label>
+      <label class="field">Ключ доступа <input id="opt-key" type="password" autocomplete="off" placeholder="не нужен, если ключ есть на сервере"></label>
       <p id="key-status" class="muted small"></p>
       <label class="field" id="base-url-field" hidden>Адрес совместимого сервера <input id="opt-base-url" placeholder="https://openrouter.ai/api/v1"></label>
       <label class="field">Основная модель <input id="opt-model"></label>
@@ -46,23 +45,19 @@
       <div id="opt-standards"></div>
       <p class="small"><a href="#/standards" id="std-manage">Изменить или добавить стандарты</a></p>
     </fieldset>
-    <fieldset>
-      <legend>Скорость и данные</legend>
-      <label class="field">Требований за один запрос <input id="opt-batch" type="number" min="1" max="40"></label>
-      <label class="field">Одновременных запросов к модели <input id="opt-parallel" type="number" min="1" max="16"></label>
-      <label class="check"><input id="opt-redact" type="checkbox"> Маскировать чувствительные данные</label>
+    <label class="check"><input id="opt-redact" type="checkbox"> Маскировать чувствительные данные перед отправкой в модель</label>
+    <details class="more advanced">
+      <summary>Дополнительно</summary>
       <label class="check"><input id="opt-ner" type="checkbox"> Искать ФИО нейросетью</label>
       <label class="check"><input id="opt-cache" type="checkbox"> Брать готовые ответы из кэша</label>
-    </fieldset>
-    <p class="muted small">Ключ хранится только в памяти страницы и передаётся серверу при запуске проверки.</p>
+      <label class="field">Требований за один запрос <input id="opt-batch" type="number" min="1" max="40"></label>
+      <label class="field">Одновременных запросов к модели <input id="opt-parallel" type="number" min="1" max="16"></label>
+    </details>
   </aside>
 
   <aside id="assistant" class="assistant" hidden aria-labelledby="assistant-title">
     <div class="assistant-head">
-      <div>
-        <h2 id="assistant-title">ИИ-помощник</h2>
-        <p class="muted small">Ответы формирует модель по документу и результатам проверки. Проверяйте их перед использованием.</p>
-      </div>
+      <h2 id="assistant-title">ИИ-помощник</h2>
       <button type="button" class="sheet-close" id="assistant-close" aria-label="Закрыть помощника">×</button>
     </div>
     <div class="focus-chip" id="assistant-focus" hidden></div>
@@ -79,15 +74,14 @@
       <h1 class="hero">Проверка требований.</h1>
       <p class="tagline">Агент находит противоречия, пробелы и непроверяемые формулировки и привязывает каждое нарушение к строке документа.</p>
       <div class="box" id="drop-zone">
-        <h2>Документы</h2>
         <div class="drop-target">
           <label class="btn file-btn">Выбрать файл(ы)<input id="file-input" type="file" multiple accept=".pdf,.docx,.md,.txt,.html,.htm" hidden></label>
           <span class="muted small">или перетащите / вставьте сюда</span>
         </div>
         <div id="doc-list"></div>
-        <label class="check"><input id="opt-fix" type="checkbox"> Сформировать исправленную редакцию документа</label>
-        <div class="row actions">
-          <button id="btn-run" type="button" class="btn primary" disabled>Проверить</button>
+        <div class="row actions run-row" id="run-row" hidden>
+          <label class="check"><input id="opt-fix" type="checkbox"> Сформировать исправленную редакцию</label>
+          <button id="btn-run" type="button" class="btn primary">Проверить</button>
         </div>
       </div>
       <div id="preview"></div>
@@ -115,14 +109,14 @@
           <h2 id="h-findings">Нарушения</h2>
           <div class="filterbar">
             <div class="segmented" id="f-sev" role="group" aria-label="Серьёзность"></div>
-            <input id="f-text" type="search" placeholder="Поиск по нарушениям" aria-label="Поиск по нарушениям">
+            <input id="f-text" type="search" placeholder="Поиск" aria-label="Поиск по нарушениям">
           </div>
           <div id="findings-list"></div>
         </section>
 
         <section class="res-section" aria-labelledby="h-questions" id="questions-section">
           <h2 id="h-questions">Вопросы заказчику</h2>
-          <p class="muted">Ответьте за заказчика и перепроверьте: агент закроет дефекты, которые ответы устраняют.</p>
+          <p class="muted">Ответы закрывают дефекты при перепроверке.</p>
           <div id="questions-list"></div>
         </section>
 
@@ -130,11 +124,11 @@
           <h2 id="h-draft">Рабочая редакция документа</h2>
           <p class="muted" id="draft-status"></p>
           <div class="row actions draft-actions">
-            <button type="button" class="btn" id="draft-edit">Править вручную</button>
-            <button type="button" class="btn" id="draft-undo">Отменить последнюю правку</button>
-            <a class="btn" id="draft-download">Скачать</a>
-            <button type="button" class="btn primary" id="draft-check">Проверить редакцию</button>
             <button type="button" class="link" id="draft-reset">Вернуть исходный текст</button>
+            <button type="button" class="btn" id="draft-undo">Отменить правку</button>
+            <a class="btn" id="draft-download">Скачать</a>
+            <button type="button" class="btn" id="draft-edit">Править вручную</button>
+            <button type="button" class="btn primary" id="draft-check">Проверить редакцию</button>
           </div>
           <div id="draft-editor" class="box" hidden>
             <textarea id="draft-text" rows="22" spellcheck="false" aria-label="Текст рабочей редакции"></textarea>
@@ -162,7 +156,8 @@
     <section id="view-history" class="view" hidden>
       <h1 class="hero">История.</h1>
       <p class="tagline">Прошлые проверки открываются без новых запросов к модели.</p>
-      <div class="box"><div id="history-table"></div></div>
+      <div id="history-table"></div>
+      <p class="history-foot" id="history-compare" hidden><a href="#/compare">Сравнить две проверки</a></p>
     </section>
 
     <section id="view-compare" class="view" hidden>
@@ -198,8 +193,7 @@
   </main>
 
   <footer class="footer">
-    <p><a href="#/check">Проверка</a> | <a href="#/history">История</a> | <a href="/docs" target="_blank" rel="noopener">Описание программного интерфейса</a></p>
-    <p class="signature">gtsbbe jr.</p>
+    <p class="signature">gtsbbe jr. <span aria-hidden="true">/</span> <a href="/docs" target="_blank" rel="noopener">API</a></p>
   </footer>
 
   <script src="static/app.js"></script>

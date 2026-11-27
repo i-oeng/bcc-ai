@@ -12,7 +12,7 @@
   --gold-dk: #a87a45;
   --ink: #111;
   --ink-2: #444;
-  --muted: #777;
+  --muted: #6b6b6b;
   --rule: #a6a6a6;
   --rule-lt: #d9d9d9;
   --coral: #fe5f54;
@@ -41,7 +41,7 @@ body {
 a { color: var(--green-dk); }
 a:hover { color: var(--green-xdk); }
 .muted { color: var(--muted); }
-.small { font: 11px/1.4 var(--sans); }
+.small { font: 12px/1.45 var(--sans); }
 
 /* ---------- вкладки сверху ---------- */
 
@@ -147,15 +147,6 @@ button:disabled, .btn:disabled, .btn.primary:disabled {
 /* ---------- данные ---------- */
 
 /* строка показателей: без рамок, разделители тонкими линиями */
-.figures { display: flex; flex-wrap: wrap; margin: 6px 0 18px; padding: 0; }
-.figures > div { padding: 2px 22px 2px 0; margin-right: 22px; border-right: 1px solid var(--rule-lt); }
-.figures > div:last-child { border-right: none; }
-.figures dt { order: 2; font: 11px/1.3 var(--sans); color: var(--muted); }
-.figures dd { margin: 0; font: 400 40px/1.05 var(--serif); letter-spacing: -.03em; color: #000; }
-.figures > div { display: flex; flex-direction: column; }
-.figures .critical dd { color: var(--red); }
-.figures .major dd { color: var(--orange); }
-.figures .minor dd { color: var(--gold-dk); }
 
 /* список документов */
 table.doclist td:last-child { white-space: nowrap; text-align: right; }
@@ -184,7 +175,7 @@ a.btn { text-decoration: none; }
 
 table { width: 100%; margin: 8px 0 14px; border-collapse: separate; border-spacing: 0; font: 15.5px/1.35 var(--serif); border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
 th, td { padding: 6px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid #e4e4e4; }
-th { font: bold 11px/1.3 var(--sans); color: #333; background: var(--pinstripe); border-bottom: 1px solid var(--rule); white-space: nowrap; }
+th { font: bold 12px/1.3 var(--sans); color: #333; background: var(--pinstripe); border-bottom: 1px solid var(--rule); white-space: nowrap; }
 tbody tr:last-child td { border-bottom: none; }
 tbody tr:hover td { background: var(--green-xlt); }
 td i { color: var(--ink-2); }
@@ -240,7 +231,7 @@ pre.log { max-height: 340px; }
 
 .footer {
   max-width: 820px; margin: 30px auto 24px; padding-top: 12px; text-align: center;
-  font: 11px/1.7 var(--sans); color: #333; border-top: 1px solid var(--rule-lt);
+  font: 12px/1.7 var(--sans); color: #333; border-top: 1px solid var(--rule-lt);
 }
 .footer p { margin: 0; }
 
@@ -268,9 +259,6 @@ button:focus-visible, a:focus-visible, summary:focus-visible, .chip:focus-visibl
 .verdict-fix h3 { margin-top: 4px; font-size: 19px; }
 .verdict-fix ol { margin: 0; padding-left: 20px; }
 .verdict-fix li { margin: 0 0 8px; font-size: 16px; }
-.verdict .figures { margin: 14px 0 0; }
-.verdict .figures dd { font-size: 30px; }
-.verdict .figures > div { padding-right: 14px; margin-right: 14px; }
 @media (max-width: 820px) { .verdict { grid-template-columns: 1fr; } .verdict-fix { border-left: none; padding-left: 0; } }
 
 .res-section { margin: 30px 0 0; }
@@ -299,7 +287,7 @@ button:focus-visible, a:focus-visible, summary:focus-visible, .chip:focus-visibl
 .card[open] > summary::after { transform: rotate(90deg); }
 .card > summary:hover { background: var(--green-xlt); border-radius: 8px; }
 .card-title { grid-column: 2; font-size: 17px; line-height: 1.3; }
-.card-meta { grid-column: 2; font: 11.5px/1.4 var(--sans); color: var(--muted); }
+.card-meta { grid-column: 2; font: 12.5px/1.4 var(--sans); color: var(--muted); }
 .card-body { padding: 4px 16px 14px; border-top: 1px solid var(--rule-lt); }
 .card.closed { opacity: .6; }
 .card.closed .card-title { text-decoration: line-through; text-decoration-color: var(--rule); }
@@ -480,3 +468,44 @@ main { flex: 1 0 auto; width: 100%; }
 .std-card .card-title, .std-card .card-meta { grid-column: 1; }
 .std-card > summary::after { grid-column: 2; }
 .std-card .card-meta b { color: var(--green-dk); }
+
+/* ---------- упрощение: меньше вкладок, кнопок и рамок ---------- */
+.toptabs #theme-toggle { min-width: 0; margin-left: 3px; padding: 3px 11px 2px; display: inline-flex; align-items: center; }
+.toptabs #theme-toggle svg { display: block; }
+.run-row { justify-content: space-between; align-items: center; margin-top: 14px; }
+.run-row .check { margin: 0; }
+#drop-zone { padding-top: 16px; }
+
+/* помощник сдвигает страницу, а не закрывает её */
+@media (min-width: 1101px) { body.with-assistant main { width: auto; max-width: none; margin: 0 400px 0 20px; } }
+
+/* история: таблица без лишней рамки вокруг */
+table.history { max-width: 820px; margin: 0 auto 10px; }
+.nowrap { white-space: nowrap; }
+.verdict-word.stop { color: var(--red); }
+.verdict-word.warn { color: var(--orange); }
+.verdict-word.go { color: var(--green-dk); }
+.history-foot { max-width: 820px; margin: 0 auto; text-align: right; font-size: 15px; }
+.center { text-align: center; }
+[data-theme="dark"] .history-foot a { color: var(--link-on-dark); }
+
+/* настройки: редкие параметры свёрнуты */
+.sheet > .check { margin: 4px 0 10px; }
+.sheet details.advanced { margin-top: 6px; }
+.sheet details.advanced > summary { font-size: 16px; }
+.sheet details.advanced[open] { padding-bottom: 6px; }
+#opt-standards .std { margin: 6px 0; }
+.footer .signature a { font: 12px var(--sans); }
+.sheet > .check input { margin-top: 5px; align-self: flex-start; }
+#history-table { overflow-x: auto; }
+@media (max-width: 640px) { .toptabs a, .toptabs button { padding: 3px 9px 2px; font-size: 15px; } }
+table.doclist thead { display: none; }
+/* история на телефоне: каждая проверка карточкой, без горизонтальной прокрутки */
+@media (max-width: 640px) {
+  table.history thead { display: none; }
+  table.history, table.history tbody, table.history tr, table.history td { display: block; width: auto; }
+  table.history tr { padding: 8px 0; border-bottom: 1px solid #e4e4e4; }
+  table.history tr:last-child { border-bottom: none; }
+  table.history td { padding: 1px 12px; border: none; }
+}
+@media (max-width: 430px) { .toptabs { gap: 1px; padding: 0 3px; } .toptabs a, .toptabs button { padding: 3px 5px 2px; font-size: 13px; } .toptabs #theme-toggle { padding: 3px 7px 2px; } .toptabs button { margin-left: 2px; } }
