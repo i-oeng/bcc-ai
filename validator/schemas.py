@@ -68,9 +68,22 @@ class SetVerdict(BaseModel):
     comment: str
 
 
+class AcceptanceCheck(BaseModel):
+    acceptance_id: str = Field(description="ID примера приёмки ТР-xx")
+    req_id: str = Field(description="ID проверяемого требования ТР-xx или пусто, если связь не установлена")
+    status: str = Field(description="agrees | conflict | unclear")
+    expected: str = Field(description="Ожидаемый результат по правилу для условий этого примера")
+    stated: str = Field(description="Результат, указанный в примере")
+    question: str = Field(description="Вопрос для разрешения расхождения или неопределённости, иначе пусто")
+
+
 class SetReview(BaseModel):
     verdicts: list[SetVerdict]
     findings: list[SetFinding]
+
+
+class ConsistencyReview(SetReview):
+    acceptance_checks: list[AcceptanceCheck]
 
 
 class CoverageRow(BaseModel):
@@ -249,3 +262,4 @@ class Finding:
     orig_id: str = ""  # ID до перенумерации (как в журнале запросов)
     resolution: str = ""  # closed | changed (после ответов на вопросы)
     resolution_note: str = ""
+    verification_status: str = ""  # confirmed | rejected | unreviewed; пусто в старых отчётах

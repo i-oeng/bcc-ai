@@ -6,14 +6,17 @@ import re
 from collections import Counter
 from pathlib import Path
 
+from .config import PROVIDERS
 from .criteria import SEVERITIES, SEVERITY_RULES, Criterion
 from .grounding import Anchor
 from .pipeline import RunResult
 from .schemas import Finding
 
 # без эмодзи: статус передаётся словом, а не значком или цветом
-MARK = {"ok": "", "violation": "×", "na": "н/п"}
-SET_MARK = {"ok": "соответствует", "partial": "частично", "violation": "нарушено"}
+MARK = {"ok": "", "violation": "×", "na": "н/п", "unreviewed": "?"}
+SET_MARK = {"ok": "соответствует", "partial": "частично", "violation": "нарушено", "unreviewed": "не проверено"}
+ACCEPTANCE_MARK = {"agrees": "согласуется", "conflict": "противоречие", "unclear": "требует уточнения",
+                   "unreviewed": "не проверено"}
 SEV_SHORT = {"critical": "крит.", "major": "сущ.", "minor": "незн."}
 KIND = {
     "functional": "функциональное",
@@ -106,8 +109,15 @@ class Renderer:
         if crit:
             out += ["", "**Главные дефекты:**", ""]
             for f in crit[:6]:
-                ids = ", ".join(self.cell(r.req(x).doc_id) for x in f.req_ids if r.req(x)) or "документ"
-                out.append(f"1. {self.fid_link(f.fid)} ({ids}): {self.cell(_first_sentence(f.problem), 220)}")
+                ids = ", ".join(dict.fromkeys(self.cell(r.req(x).doc_id) for x in f.req_ids if r.req(x))) or "документ"
+                out.append(f"1. {self.fid_link(f.fid)} ({ids}). {self.cell(f.problem, 340)}")
+                out.append("   " + " / ".join(self.quote(a, 125) for a in f.anchors[:2]))
+                question = next(((i, q) for i, q in enumerate(r.questions, 1) if f.fid in q.finding_ids), None)
+                if question:
+                    i, q = question
+                    out.append(f"   [В-{i}](#в-{i}) {self.cell(q.question)}")
+                else:
+                    out.append(f"   {self.cell(f.fix, 240)}")
             if len(crit) > 6:
                 out.append(f"\nЕщё критичных: {len(crit) - 6}, см. [сводку](#сводка).")
         if blocking:
@@ -122,12 +132,12 @@ class Renderer:
     def passport(self) -> str:
         r = self.res
         u = r.usage
-        model = f"Google Gemini `{r.config.model}`"
+        provider = getattr(r.config, "provider", "gemini")
+        model = f"{PROVIDERS.get(provider, {}).get('title', provider)} `{r.config.model}`"
         if u and u.steps:
             used = Counter(m for _, m in u.steps)
             if set(used) != {r.config.model}:
                 model += "; фактически ответили: " + ", ".join(f"`{m}` (шагов: {n})" for m, n in used.most_common())
-                model += " (основная модель была перегружена, сработала запасная цепочка)"
         red = r.redactor.stats() if r.redactor else {}
         if not r.config.redact:
             red_txt = "отключено"
@@ -156,6 +166,11 @@ class Renderer:
             rows.append(("Кэш ответов", f"шагов взято из кэша: {u.cached} (проверка продолжена после сбоя или повторена)"))
         if dur:
             rows.append(("Длительность", dur))
+        phases = getattr(r, "phase_seconds", {})
+        if phases:
+            names = {"segment": "извлечение", "review": "проверка", "verify_and_dedupe": "верификация",
+                     "final": "итог"}
+            rows.append(("Время по этапам", ", ".join(f"{names[k]} {v:.1f} с" for k, v in phases.items() if k in names)))
         for w in getattr(r, "warnings", []) or []:
             rows.append(("Предупреждение", self.cell(w, 300)))
         if r.audit_dir:
@@ -221,10 +236,10 @@ class Renderer:
             v = r.req_verdicts.get(q.rid, {})
             rows.append(
                 f"| [{q.rid}](#{q.rid.lower()}) | {self.cell(q.doc_id, 28)} | "
-                + " | ".join(MARK.get(v.get(c.code, ("ok", ""))[0], "") for c in self.P.requirement) + " |"
+                + " | ".join(MARK.get(v.get(c.code, ("unreviewed", ""))[0], "?") for c in self.P.requirement) + " |"
             )
         legend = (
-            "Обозначения: × нарушение (см. находки), н/п не применимо, пустая клетка: соответствует. Столбцы: "
+            "Обозначения: × нарушение (см. находки), н/п не применимо, ? не проверено, пустая клетка соответствует. Столбцы: "
             + "; ".join(f"{c.column} = {c.name} ({c.source})" for c in self.P.requirement) + "."
         )
         out = ["## 3. Проверка каждого требования", "", "### 3.1. Матрица критериев", "", head, sep, *rows, "", legend, "",
@@ -257,22 +272,36 @@ class Renderer:
         out = ["## 4. Проверка всего набора требований", "", "| Критерий | Источник | Оценка | Комментарий |",
                "| :--- | :--- | :--- | :--- |"]
         for c in self.P.set:
-            v, comment = r.set_verdicts.get(c.code, ("ok", ""))
+            v, comment = r.set_verdicts.get(c.code, ("unreviewed", ""))
             ids = [f.fid for f in r.kept() if f.criterion == c.code]
             note = self.cell(comment, 300)
             if ids:
                 note += (" " if note else "") + "Находки: " + ", ".join(ids) + "."
             out.append(f"| {c.name} | {c.source} | {SET_MARK.get(v, v)} | {note} |")
-        if r.coverage:
+        checks = getattr(r, "acceptance_checks", [])
+        if checks:
+            out += ["", "### Сверка примеров приёмки", "",
+                    "| Пример | Правило | Оценка | По правилу | В примере | Вопрос |",
+                    "| :--- | :--- | :--- | :--- | :--- | :--- |"]
+            for c in checks:
+                example, rule = r.req(c.acceptance_id), r.req(c.req_id)
+                a = f"[{example.rid}](#{example.rid.lower()}), {example.anchor.where()}"
+                b = f"[{rule.rid}](#{rule.rid.lower()}), {rule.anchor.where()}" if rule else "—"
+                out.append(f"| {self.cell(a)} | {self.cell(b)} | {ACCEPTANCE_MARK[c.status]} | "
+                           f"{self.cell(c.expected)} | {self.cell(c.stated)} | {self.cell(c.question)} |")
+        if r.coverage or checks:
+            coverage = {c.req_id: c for c in r.coverage}
+            statuses = {(c.req_id, c.acceptance_id): c.status for c in checks}
             out += ["", "### Покрытие функциональных требований критериями приёмки", "",
-                    "| Требование | Проверяется критериями приёмки | Непокрытые сценарии |", "| :--- | :--- | :--- |"]
-            for c in r.coverage:
-                q = r.req(c.req_id)
-                acc = ", ".join(f"{a} ({self.cell(r.req(a).doc_id)})" for a in c.acceptance_ids if r.req(a)) or "нет"
-                miss = "; ".join(self.cell(m, 160) for m in c.missing_scenarios) or "нет"
-                out.append(f"| {c.req_id} ({self.cell(q.doc_id) if q else ''}) | {acc} | {miss} |")
-            uncovered = sum(1 for c in r.coverage if not c.acceptance_ids)
-            out += ["", f"Без единого критерия приёмки: {uncovered} из {len(r.coverage)} функциональных требований."]
+                    "| Требование | Связанные примеры и результат сверки | Непокрытые сценарии |", "| :--- | :--- | :--- |"]
+            for q in (q for q in r.requirements if q.kind == "functional"):
+                c = coverage.get(q.rid)
+                linked = list(dict.fromkeys([*(c.acceptance_ids if c else []),
+                                             *(aid for rid, aid in statuses if rid == q.rid)]))
+                acc = ", ".join(f"{aid} ({ACCEPTANCE_MARK[statuses.get((q.rid, aid), 'unreviewed')]})"
+                                for aid in linked) or ("нет" if c else "не проверено")
+                miss = (" / ".join(self.cell(m, 160) for m in c.missing_scenarios) or "нет") if c else "не проверено"
+                out.append(f"| {q.rid} ({self.cell(q.doc_id)}) | {acc} | {miss} |")
         kept_set = [f for f in r.kept() if f.scope == "set"]
         order = [c.code for c in self.P.set] + [c.code for c in self.P.requirement]
         for code in order:
@@ -346,7 +375,8 @@ class Renderer:
         kept = r.open_findings()
         closed_n = len(r.kept()) - len(kept)
         by_sev = Counter(f.severity for f in kept)
-        rejected = [f for f in r.findings if not f.kept]
+        rejected = [f for f in r.findings if not f.kept and f.verification_status != "unreviewed"]
+        unreviewed = sum(f.verification_status == "unreviewed" for f in r.findings)
         dups = [f for f in r.findings if f.kept and f.duplicate_of]
         out = [
             '<a id="сводка"></a>',
@@ -358,7 +388,7 @@ class Renderer:
             f"* Открытых подтверждённых нарушений: **{len(kept)}** (критичных {by_sev['critical']}, существенных "
             f"{by_sev['major']}, незначительных {by_sev['minor']})"
             + (f"; ещё {closed_n} закрыто ответами заказчика." if closed_n else "."),
-            f"* Отклонено верификатором: {len(rejected)}; объединено дублей: {len(dups)}; "
+            f"* Отклонено верификатором: {len(rejected)}; без решения: {unreviewed}; объединено дублей: {len(dups)}; "
             f"отброшено без опоры на текст: {len(r.ungrounded)}.",
             f"* Вопросов для уточнения: {len(r.questions)} (блокирующих {sum(1 for q in r.questions if q.priority == 'blocking')}).",
             "",
@@ -407,8 +437,8 @@ class Renderer:
                 ids = ", ".join(self.fid_link(x) for x in it.finding_ids if x in self.by_id)
                 out.append(f"{i}. **{self.t(it.title)}.** {self.t(it.action)}" + (f" ({ids})" if ids else ""))
             out += ["", f"**Общий вывод.** {self.t(c.overall)}"]
-        out += ["", "Правило решения: есть хотя бы один критичный дефект, значит начинать нельзя; есть только существенные, "
-                "значит можно с оговорками. Решение принимает код, а не модель."]
+        out += ["", "Критичный дефект блокирует затронутую работу. При неполной проверке готовность остаётся "
+                "неподтверждённой. После полной проверки существенные дефекты допускают начало работы с оговорками."]
         return "\n".join(out)
 
     def appendix(self) -> str:
@@ -419,13 +449,14 @@ class Renderer:
             "1. Документ прочитан и приведён к тексту с номерами строк; чувствительные данные (карты, ИИН, IBAN, "
             "телефоны, e-mail, токены, ФИО) заменены плейсхолдерами до отправки в модель, исходные значения "
             "возвращены только в этом отчёте.",
-            "2. Модель выделила требования; каждая цитата найдена в документе (точно или нечётко), иначе требование отброшено.",
+            "2. Явно размеченные пункты и строки приёмки выделены локально. Остальные требования выделяет модель, "
+            "цитаты привязаны к исходным строкам.",
             "3. Детерминированные правила проверили размытые слова, пустые поля шаблона, версию, приоритеты, единицы, "
             "семантику HTTP и коды ответа.",
             f"4. Модель проверила каждое требование по {len(self.P.requirement)} критериям и набор по {len(self.P.set)} критериям "
             f"({self.P.cites()}), набор двумя отдельными проходами: противоречия; полнота и прочие свойства.",
-            "5. Находки без цитаты из документа отброшены. Остальные проверил независимый проход модели: отклонил домыслы, "
-            "откалибровал серьёзность, объединил дубли.",
+            "5. Находки без цитаты из документа отброшены. Прямую сверку дат выполнил код. Остальные находки проверяет "
+            "модель, а пропущенные ответы верификатора отмечаются в приложении.",
             "6. По подтверждённым находкам модель составила вопросы для уточнения и итог; решение о готовности принимает код.",
             "",
             "**Шкала серьёзности.**",
@@ -434,9 +465,8 @@ class Renderer:
         ]
         rejected = [f for f in r.findings if not f.kept]
         if rejected:
-            out += ["", "## Приложение B. Отклонённые верификатором находки", "",
-                    "Показаны для прозрачности: эти находки не учтены в сводке.", "",
-                    "| ID | Критерий | Находка | Причина отклонения |", "| :--- | :--- | :--- | :--- |"]
+            out += ["", "## Приложение B. Неподтверждённые находки", "",
+                    "| ID | Критерий | Находка | Результат проверки |", "| :--- | :--- | :--- | :--- |"]
             for f in rejected:
                 out.append(f"| <a id=\"{f.fid.lower()}\"></a>{f.fid} | {self.P.name(f.criterion)} | "
                            f"{self.cell(_first_sentence(f.problem), 200)} | {self.cell(f.verifier_note, 200)} |")

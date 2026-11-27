@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from validator import pipeline, report
 from validator.config import Config
 from validator.llm import Usage
@@ -10,6 +12,7 @@ from validator.schemas import (
     AssistantReply,
     Clarification,
     CompletenessReview,
+    ConsistencyReview,
     Conclusion,
     Dedup,
     Final,
@@ -21,6 +24,13 @@ from validator.schemas import (
 )
 
 SAMPLE = Path(__file__).resolve().parent.parent / "samples" / "requirements.md"
+
+
+@pytest.fixture(autouse=True)
+def model_only_fixture(monkeypatch):
+    # Этот набор проверяет стабильные ID в ответах старой поддельной модели.
+    monkeypatch.setattr(pipeline.structured, "extract", lambda g: ([], g.src))
+    monkeypatch.setattr(pipeline.structured, "purchase_month_checks", lambda _: [])
 
 
 class FakeClient:
@@ -52,8 +62,9 @@ class FakeClient:
                               {"criterion": "verifiable", "severity": "major", "quotes": ["цитата, которой нет в документе вообще"],
                                "problem": "выдумка", "fix": "-"}]},
             ]})
-        if schema in (SetReview, CompletenessReview):
-            return schema.model_validate({"coverage": [{"req_id": "ТР-02", "acceptance_ids": ["ТР-03"], "missing_scenarios": ["возврат"]},
+        if schema in (SetReview, ConsistencyReview, CompletenessReview):
+            return schema.model_validate({"acceptance_checks": [],
+                                          "coverage": [{"req_id": "ТР-02", "acceptance_ids": ["ТР-03"], "missing_scenarios": ["возврат"]},
                                                        {"req_id": "ТР-01", "acceptance_ids": [], "missing_scenarios": ["граница 1 000"]}],
                                           "verdicts": [{"criterion": "set_consistent", "verdict": "violation", "comment": "есть противоречия"}],
                                              "findings": [{"criterion": "set_consistent", "severity": "critical", "req_ids": ["ТР-02", "ТР-03"],
@@ -128,6 +139,8 @@ def test_end_to_end(tmp_path, monkeypatch):
     main = next(f for f in res.findings if "Ф-2 относит" in f.problem)
     dup = next(f for f in res.findings if "То же противоречие" in f.problem and f.duplicate_of)
     assert dup.duplicate_of == main.fid and "ТР-03" in main.req_ids
+    # одинаковая находка из двух проходов по набору не показывается дважды
+    assert not [f for f in res.kept() if "То же противоречие" in f.problem and not f.duplicate_of]
     kept_ids = [f.fid for f in res.kept()]
     assert kept_ids == [f"Н-{i:02d}" for i in range(1, len(kept_ids) + 1)]
     out = report.write(res, tmp_path / "report.md")

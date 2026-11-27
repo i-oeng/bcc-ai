@@ -315,7 +315,7 @@ class LLMClient:
         self.should_stop = should_stop
         # хедж: если ответа нет дольше hedge_after секунд, тот же запрос уходит второй раз, берётся первый ответ.
         # У бесплатных моделей время ответа скачет от 40 с до нескольких минут, хедж срезает такие хвосты.
-        self.hedge_after = float(os.getenv("VALIDATOR_HEDGE_SECONDS", "90")) if hedge_after is None else hedge_after
+        self.hedge_after = float(os.getenv("VALIDATOR_HEDGE_SECONDS", "60")) if hedge_after is None else hedge_after
         self._lock = threading.Lock()
         if audit_dir:
             audit_dir.mkdir(parents=True, exist_ok=True)

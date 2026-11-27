@@ -1,7 +1,7 @@
 """Конвейер проверки.
 
   1. Чтение документа и маскирование чувствительных данных.
-  2. LLM: нарезка на требования; цитаты привязываются к строкам документа.
+  2. Нарезка по разметке и с помощью LLM, с привязкой к строкам документа.
   3. Правила: детерминированные проверки.
   4. LLM: проверка каждого требования по критериям выбранных стандартов (пакетами).
   5. LLM: проверка набора: противоречия; полнота и прочие свойства набора.
@@ -22,7 +22,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, prompts, rules
+from rapidfuzz import fuzz
+
+from . import __version__, prompts, rules, structured
 from .config import Config
 from .criteria import DEFAULT, SEVERITIES, Profile, profile as make_profile
 from .grounding import Anchor, Grounder
@@ -30,10 +32,12 @@ from .llm import Cancelled, LLMError, make_client
 from .loader import Document, load
 from .redact import Redactor
 from .schemas import (
+    AcceptanceCheck,
     Clarification,
     Conclusion,
     AnswerReview,
     CompletenessReview,
+    ConsistencyReview,
     Dedup,
     Final,
     FixedDocument,
@@ -47,6 +51,7 @@ from .schemas import (
 
 SEV_ORDER = {"critical": 0, "major": 1, "minor": 2}
 DEDUPE_THRESHOLD = 45
+VERIFY_CHUNK = 30  # больше находок: верификация идёт несколькими параллельными запросами
 
 
 @dataclass
@@ -77,6 +82,9 @@ class RunResult:
     fixed: FixedDocument | None = None
     audit_dir: Path | None = None
     profile: Profile | None = None  # стандарты проверки и их критерии
+    acceptance_checks: list[AcceptanceCheck] = field(default_factory=list)
+    phase_seconds: dict[str, float] = field(default_factory=dict)
+    local_requirements: int = 0
 
     @property
     def prof(self) -> Profile:
@@ -172,6 +180,8 @@ def _run(
         + ("" if cfg.redact else " (ОТКЛЮЧЕНО)"))
     grounder = Grounder(doc, masked)
     numbered = _numbered(masked)
+    local, residual = structured.extract(grounder)
+    segment_prompt = prompts.segmentation(_numbered(residual) if local else numbered, extracted=bool(local))
 
     stamp = started.strftime("%Y%m%d-%H%M%S")
     audit, n = Path(cfg.runs_dir) / stamp, 1
@@ -195,9 +205,9 @@ def _run(
     (audit / "masked_input.md").write_text(masked, encoding="utf-8")
 
     if dry_run:
-        redactor.guard(SYSTEM + prompts.segmentation(numbered))
+        redactor.guard(SYSTEM + segment_prompt)
         (audit / "01_segment.request.md").write_text(
-            f"# SYSTEM\n\n{SYSTEM}\n\n# USER\n\n{prompts.segmentation(numbered)}", encoding="utf-8"
+            f"# SYSTEM\n\n{SYSTEM}\n\n# USER\n\n{segment_prompt}", encoding="utf-8"
         )
         log(f"Сухая проверка: в модель ничего не отправлено. Что ушло бы: {audit}")
         return res
@@ -211,11 +221,16 @@ def _run(
 
     # 2. нарезка
     t = _step(log, "Нарезка документа на требования", stop)
-    seg = client.generate("segment", SYSTEM, prompts.segmentation(numbered), Segmentation)
+    res.local_requirements = len(local)
+    res.requirements.extend(local)
+    local_lines = {r.anchor.line for r in local}
+    seg = client.generate("segment", SYSTEM, segment_prompt, Segmentation)
     for r in seg.requirements:
         a = grounder.find(r.quote, min_score=85)
         if not a:
             res.lost_requirements.append(f"{r.doc_id}: {r.quote}")
+            continue
+        if a.line == a.line_end and a.line in local_lines:
             continue
         res.requirements.append(
             Requirement(rid="", doc_id=r.doc_id.strip() or "без номера", section=r.section, summary=r.summary,
@@ -230,6 +245,7 @@ def _run(
           + (f", {len(res.lost_requirements)} отброшено (цитата не найдена)" if res.lost_requirements else ""))
     if not res.requirements:
         raise RuntimeError("Модель не выделила ни одного требования с цитатой из документа")
+    res.phase_seconds["segment"] = round(time.perf_counter() - t, 3)
 
     # 3. правила
     t = _step(log, "Детерминированные проверки", stop)
@@ -241,6 +257,8 @@ def _run(
         req_ids = [] if h.whole_doc else _reqs_for_lines(res, h.lines)
         scope = "requirement" if (req_ids and not h.criterion.startswith("set_")) else "set"
         raw.append(Finding("", scope, h.criterion, h.severity, req_ids, anchors, h.problem, h.fix, "rule"))
+    acceptance_pairs = structured.purchase_month_checks(res.requirements)
+    raw.extend(f for _, f in acceptance_pairs)
     _done(log, t, f"{len(raw)} находок")
 
     # 4-5. проверка требований пакетами и два прохода по набору: шаги независимы, идут параллельно
@@ -255,10 +273,12 @@ def _run(
              "lines": f"{r.anchor.line}-{r.anchor.line_end}", "quote": r.quote}
             for r in batch
         ]
-        tasks.append((f"review_{bi}", lambda p=payload, bi=bi: client.generate(
-            f"review_{bi}", SYSTEM, prompts.requirement_review(numbered, p, prof), RequirementBatch)))
+        tasks.append((f"review_{bi}", lambda p=payload, bi=bi: _review_batch(
+            client, f"review_{bi}", SYSTEM, numbered, p, prof)))
+    acceptance = "\n".join(f"{r.rid} | строка {r.anchor.line} | {r.quote}" for r in res.requirements
+                           if r.kind == "acceptance")
     tasks.append(("set_consistency", lambda: client.generate(
-        "set_consistency", SYSTEM, prompts.set_consistency(numbered, table, known), SetReview)))
+        "set_consistency", SYSTEM, prompts.set_consistency(numbered, table, known, acceptance), ConsistencyReview)))
     tasks.append(("set_completeness", lambda: client.generate(
         "set_completeness", SYSTEM, prompts.set_completeness(numbered, table, known, prof), CompletenessReview)))
     t = _step(log, f"Проверка требований ({len(batches)} пакетов) и набора (2 прохода), параллельно", stop)
@@ -266,33 +286,40 @@ def _run(
 
     n_req = 0
     for bi in range(1, len(batches) + 1):
-        for rv in outs[f"review_{bi}"].reviews:
-            rid = _norm_rid(rv.req_id)
-            if not res.req(rid):
-                continue
-            res.req_verdicts[rid] = {
-                v.criterion: (v.verdict.strip().lower(), v.comment) for v in rv.verdicts if prof.has(v.criterion)
-            }
-            for f in rv.findings:
-                raw.append(_finding_from_llm("requirement", f.criterion, f.severity, [rid], f.quotes, f.problem, f.fix,
-                                             grounder, prof))
-                n_req += 1
+        verdicts, findings = outs[f"review_{bi}"]
+        res.req_verdicts.update(verdicts)
+        for rid, f in findings:
+            raw.append(_finding_from_llm("requirement", f.criterion, f.severity, [rid], f.quotes, f.problem, f.fix,
+                                         grounder, prof))
+            n_req += 1
     n_set = 0
     for name in ("set_consistency", "set_completeness"):
         out = outs[name]
         if isinstance(out, CompletenessReview):
-            res.coverage = [c for c in out.coverage if res.req(_norm_rid(c.req_id))]
-            for c in res.coverage:
-                c.req_id = _norm_rid(c.req_id)
-                c.acceptance_ids = [a for a in (_norm_rid(x) for x in c.acceptance_ids) if res.req(a)]
+            rows = {}
+            for c in out.coverage:
+                req = res.req(_norm_rid(c.req_id))
+                if req and req.kind == "functional":
+                    c.req_id = req.rid
+                    c.acceptance_ids = list(dict.fromkeys(a.rid for x in c.acceptance_ids
+                        if (a := res.req(_norm_rid(x))) and a.kind == "acceptance"))
+                    rows[c.req_id] = c
+            res.coverage = list(rows.values())
         for v in out.verdicts:
-            if prof.has(v.criterion):
-                res.set_verdicts[v.criterion] = (v.verdict.strip().lower(), v.comment)
+            status = v.verdict.strip().lower()
+            if (any(c.code == v.criterion for c in prof.set)
+                    and (v.criterion == "set_consistent") == (name == "set_consistency")
+                    and status in ("ok", "partial", "violation")):
+                res.set_verdicts[v.criterion] = (status, v.comment)
         for f in out.findings:
             req_ids = [r for r in (_norm_rid(x) for x in f.req_ids) if res.req(r)]
             crit = f.criterion if prof.has(f.criterion) else "set_consistent" if name == "set_consistency" else "set_complete"
             raw.append(_finding_from_llm("set", crit, f.severity, req_ids, f.quotes, f.problem, f.fix, grounder, prof))
             n_set += 1
+    checks = getattr(outs["set_consistency"], "acceptance_checks", [])
+    res.acceptance_checks, checked_conflicts = _acceptance_checks(res, checks, acceptance_pairs)
+    raw.extend(f for f in checked_conflicts.values() if f.source != "rule")
+    res.phase_seconds["review"] = round(time.perf_counter() - t, 3)
     _done(log, t, f"по требованиям {n_req} находок, по набору {n_set}")
 
     # 6. привязка к тексту
@@ -310,23 +337,10 @@ def _run(
         log(f"  отброшено находок без опоры на текст документа: {len(res.ungrounded)}")
 
     # 7. верификация
-    t = _step(log, f"Верификация {len(res.findings)} находок", stop)
-    by_line = sorted(res.findings, key=lambda f: (f.anchors[0].line, f.fid))
-    ver = client.generate("verify", SYSTEM, prompts.verification(numbered, _findings_block(by_line)), Verification)
-    by_id = {f.fid: f for f in res.findings}
-    for it in ver.items:
-        f = by_id.get(it.finding_id.strip())
-        if not f:
-            continue
-        f.kept = bool(it.keep)
-        if it.severity in SEVERITIES:
-            f.severity = it.severity
-        dup = it.duplicate_of.strip()
-        if dup and dup in by_id and dup != f.fid and by_id[dup].kept is not False:
-            f.duplicate_of = dup
-        f.verifier_note = it.reason
-    _fix_duplicate_chains(res)
-    _done(log, t, f"подтверждено {len(res.kept())}, отклонено {sum(1 for f in res.findings if not f.kept)}, "
+    verify_started = _step(log, f"Верификация {len(res.findings)} находок", stop)
+    _verify(res, client, SYSTEM, numbered)
+    _done(log, verify_started, f"подтверждено {len(res.kept())}, "
+          f"отклонено {sum(f.verification_status == 'rejected' for f in res.findings)}, "
           f"дублей {sum(1 for f in res.findings if f.kept and f.duplicate_of)}")
 
     # 7б. отдельный проход по дублям, только если находок много (экономим квоту)
@@ -340,10 +354,21 @@ def _run(
         except LLMError as e:
             res.warnings.append(f"Проход объединения дублей не выполнен: {e}")
             log(f"  пропущено: {e}")
+    same = _merge_same_findings(res)
     _merge_duplicates_into_main(res)
+    again = _merge_same_findings(res)
+    if again:
+        _merge_duplicates_into_main(res)
+    if same + again:
+        log(f"  объединено одинаковых находок из разных проходов: {same + again}")
     _renumber(res)
+    # Статус сверки меняется после независимой проверки заявленного противоречия.
+    for check, finding in checked_conflicts.items():
+        if not finding.kept:
+            res.acceptance_checks[check].status = "unreviewed" if finding.verification_status == "unreviewed" else "unclear"
     kept = res.kept()
     _reconcile_verdicts(res)
+    res.phase_seconds["verify_and_dedupe"] = round(time.perf_counter() - verify_started, 3)
 
     # 7в. ответы заказчика на вопросы прошлой проверки
     answers_txt = "(ответов пока нет)"
@@ -369,6 +394,7 @@ def _run(
     # 8-9. вопросы, итог и чек-лист ревью; исправленная редакция (по запросу). Решение о готовности принимает код.
     # Оба запроса зависят только от подтверждённых находок, поэтому идут параллельно.
     _decide(res)
+    _add_acceptance_questions(res, checked_conflicts)
     res.checklist_items = rules.checklist_items(masked.split("\n"))
     open_ = res.open_findings()
     important = [f for f in open_ if f.severity in ("critical", "major")] or open_
@@ -387,7 +413,9 @@ def _run(
     fin = outs.get("final")
     if isinstance(fin, Final):
         order = {"blocking": 0, "important": 1, "nice": 2}
-        res.questions = sorted(fin.questions, key=lambda q: order.get(q.priority, 3))
+        covered = {fid for q in res.questions for fid in q.finding_ids}
+        res.questions.extend(q for q in fin.questions if not q.finding_ids or not covered.issuperset(q.finding_ids))
+        res.questions.sort(key=lambda q: order.get(q.priority, 3))
         res.checklist = fin.checklist if res.checklist_items else []
         res.conclusion = Conclusion(
             development_rationale=fin.development_rationale, testing_rationale=fin.testing_rationale,
@@ -406,6 +434,7 @@ def _run(
             log(f"  исправленная редакция пропущена: {fx}")
     _done(log, t, f"{len(res.questions)} вопросов"
           + (f"; изменений в редакции: {len(res.fixed.changes)}" if res.fixed else ""))
+    res.phase_seconds["final"] = round(time.perf_counter() - t, 3)
 
     res.finished = datetime.now(cfg.tz)
     save_json(res, audit / "result.json")
@@ -453,6 +482,8 @@ def save_json(res: RunResult, path: Path) -> None:
         "provider": getattr(res.config, "provider", "gemini"),
         "standards": res.prof.ids,
         "seconds": round((res.finished - res.started).total_seconds()) if res.finished else None,
+        "phase_seconds": getattr(res, "phase_seconds", {}),
+        "local_requirements": getattr(res, "local_requirements", 0),
         "model_versions": sorted(res.usage.model_versions) if res.usage else [],
         "steps": list(res.usage.steps) if res.usage else [],
         "agent_version": res.agent_version,
@@ -465,6 +496,7 @@ def save_json(res: RunResult, path: Path) -> None:
             {"fid": f.fid, "orig_id": f.orig_id, "scope": f.scope, "criterion": f.criterion, "severity": f.severity, "req_ids": f.req_ids,
              "source": f.source, "kept": f.kept, "duplicate_of": f.duplicate_of, "problem": f.problem, "fix": f.fix,
              "verifier_note": f.verifier_note, "resolution": f.resolution, "resolution_note": f.resolution_note,
+             "verification_status": f.verification_status,
              "anchors": [anchor(a) for a in f.anchors]}
             for f in res.findings
         ],
@@ -473,6 +505,9 @@ def save_json(res: RunResult, path: Path) -> None:
         "decision": {"development": res.decision_dev, "testing": res.decision_test},
         "warnings": res.warnings,
         "coverage": [c.model_dump() for c in res.coverage],
+        "acceptance_checks": [c.model_dump() for c in getattr(res, "acceptance_checks", [])],
+        "requirement_verdicts": res.req_verdicts,
+        "set_verdicts": res.set_verdicts,
         "checklist": [c.model_dump() for c in res.checklist],
         "answers": [{"qid": q.qid, "question": q.question, "answer": q.answer} for q in res.answers],
     }
@@ -480,6 +515,153 @@ def save_json(res: RunResult, path: Path) -> None:
 
 
 # ---------- вспомогательные ----------
+
+
+def _review_batch(client, name, system, numbered, payload, prof):
+    criteria = [c.code for c in prof.requirement]
+    requested = {p["rid"]: criteria for p in payload}
+    verdicts = {rid: {} for rid in requested}
+    findings = []
+    seen = set()
+
+    def collect(out, expected):
+        for review in out.reviews:
+            rid = _norm_rid(review.req_id)
+            codes = expected.get(rid, ())
+            for v in review.verdicts:
+                status = v.verdict.strip().lower()
+                if v.criterion in codes and status in ("ok", "violation", "na"):
+                    verdicts[rid].setdefault(v.criterion, (status, v.comment))
+            for f in review.findings:
+                key = (rid, f.criterion, f.problem, tuple(f.quotes))
+                if f.criterion in codes and key not in seen:
+                    seen.add(key)
+                    findings.append((rid, f))
+
+    collect(client.generate(name, system, prompts.requirement_review(numbered, payload, prof), RequirementBatch),
+            requested)
+    missing = {rid: [c for c in codes if c not in verdicts[rid]] for rid, codes in requested.items()
+               if len(verdicts[rid]) < len(codes)}
+    if missing:
+        subset = [p for p in payload if p["rid"] in missing]
+        try:
+            retry = client.generate(f"{name}_missing", system,
+                                    prompts.requirement_review(numbered, subset, prof, missing), RequirementBatch)
+            collect(retry, missing)
+        except LLMError:
+            pass  # оставшиеся пропуски отражаются в матрице и решении о готовности
+    return verdicts, findings
+
+
+def _acceptance_checks(res, submitted, local_pairs):
+    pairs = {(c.acceptance_id, c.req_id): (c, f) for c, f in local_pairs}
+    for c in submitted:
+        example = res.req(_norm_rid(c.acceptance_id))
+        rule = res.req(_norm_rid(c.req_id))
+        if not example or example.kind != "acceptance":
+            continue
+        if not rule or rule.kind == "acceptance":
+            if c.status == "unclear" and not c.req_id.strip():
+                c.acceptance_id = example.rid
+                pairs.setdefault((example.rid, ""), (c, None))
+            continue
+        key = (example.rid, rule.rid)
+        if key in pairs or c.status not in ("agrees", "conflict", "unclear"):
+            continue
+        if c.status != "unclear":
+            stated = Grounder._normalize(c.stated)[0].strip(" .")
+            example_text = Grounder._normalize(example.quote)[0]
+            if not c.expected.strip() or not stated or stated not in example_text:
+                continue
+        c.acceptance_id, c.req_id = key
+        finding = None
+        if c.status == "conflict":
+            if not c.question.strip() or rule.anchor.line == example.anchor.line:
+                continue
+            finding = Finding("", "set", "set_consistent", "major", [rule.rid, example.rid],
+                              [rule.anchor, example.anchor],
+                              f"По {rule.doc_id} ожидается: {c.expected} В примере указано: {c.stated}",
+                              c.question, "llm")
+        pairs[key] = (c, finding)
+    reviewed = {example_id for example_id, _ in pairs}
+    for r in res.requirements:
+        if r.kind == "acceptance" and r.rid not in reviewed:
+            pairs[(r.rid, "")] = (AcceptanceCheck(acceptance_id=r.rid, req_id="", status="unreviewed",
+                                                   expected="", stated="", question=""), None)
+    ordered = sorted(pairs.values(), key=lambda pair: (res.req(pair[0].acceptance_id).anchor.line, pair[0].req_id))
+    return [c for c, _ in ordered], {i: f for i, (_, f) in enumerate(ordered) if f is not None}
+
+
+def _verify(res, client, system, numbered):
+    pending = {f.fid: f for f in sorted(res.findings, key=lambda f: (f.anchors[0].line, f.fid))
+               if f.verification_status != "confirmed"}
+    all_ids = {f.fid for f in res.findings}
+    confirmed = "\n".join(f"- {f.fid}: {f.problem}" for f in res.findings if f.verification_status == "confirmed")
+    def ask(name, chunk):
+        others = "\n".join(f"- {f.fid}: {f.problem}" for f in res.findings
+                           if f.fid not in chunk and f.verification_status != "confirmed")
+        prompt = prompts.verification(numbered, _findings_block(list(chunk.values())), confirmed, others)
+        return client.generate(name, system, prompt, Verification)
+
+    for round_ in ("verify", "verify_missing"):
+        if not pending:
+            break
+        items = list(pending.values())
+        if round_ == "verify" and len(items) > VERIFY_CHUNK:
+            # Соседние по документу находки в одном запросе: дубли чаще всего рядом.
+            n = -(-len(items) // VERIFY_CHUNK)
+            size = -(-len(items) // n)
+            chunks = {f"verify_{i + 1}": {f.fid: f for f in items[i * size:(i + 1) * size]} for i in range(n)}
+        else:
+            chunks = {round_: dict(pending)}
+        outs, errors = [], []
+        with ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+            futures = {pool.submit(ask, name, chunk): name for name, chunk in chunks.items()}
+            for fut in futures:
+                try:
+                    outs.append(fut.result())
+                except LLMError as e:
+                    errors.append(e)
+        if round_ == "verify" and errors and not outs:
+            raise errors[0]
+        for it in (it for out in outs for it in out.items):
+            f = pending.pop(it.finding_id.strip(), None)
+            if not f:
+                continue
+            f.kept = it.keep
+            f.verification_status = "confirmed" if it.keep else "rejected"
+            if it.severity in SEVERITIES:
+                f.severity = it.severity
+            dup = it.duplicate_of.strip()
+            if f.kept and dup != f.fid and dup in all_ids:
+                f.duplicate_of = dup
+            f.verifier_note = it.reason
+    for f in pending.values():
+        f.kept = False
+        f.verification_status = "unreviewed"
+        f.verifier_note = "Верификатор не вернул решение по находке."
+    if pending:
+        res.warnings.append(f"Находок без решения верификатора: {len(pending)}.")
+    _fix_duplicate_chains(res)
+
+
+def _add_acceptance_questions(res, conflicts):
+    from .schemas import Question
+
+    open_by_id = {f.fid: f for f in res.open_findings()}
+    used = set()
+    for i, candidate in conflicts.items():
+        fid = candidate.duplicate_of or candidate.fid
+        finding = open_by_id.get(fid)
+        if not candidate.kept or not finding or fid in used:
+            continue
+        check = res.acceptance_checks[i]
+        used.add(fid)
+        res.questions.append(Question(priority="blocking" if finding.severity == "critical" else "important",
+                                      addressee="Бизнес-заказчик", req_ids=candidate.req_ids,
+                                      finding_ids=[fid], quote=candidate.anchors[-1].text,
+                                      question=check.question, why=candidate.problem,
+                                      options=[check.expected, check.stated]))
 
 
 def _numbered(text: str) -> str:
@@ -492,7 +674,7 @@ def _step(log, title: str, stop=None) -> float:
     if stop and stop():
         raise Cancelled("Проверка остановлена")
     log(f"▸ {title}…")
-    return time.time()
+    return time.perf_counter()
 
 
 def _parallel(tasks: list[tuple[str, object]], workers: int, stop, tolerate: bool = False) -> dict:
@@ -525,7 +707,7 @@ def _parallel(tasks: list[tuple[str, object]], workers: int, stop, tolerate: boo
 
 
 def _done(log, t0: float, msg: str) -> None:
-    log(f"  готово за {time.time() - t0:.0f} с" + (f": {msg}" if msg else ""))
+    log(f"  готово за {time.perf_counter() - t0:.0f} с" + (f": {msg}" if msg else ""))
 
 
 def _norm_rid(x: str) -> str:
@@ -589,7 +771,7 @@ def _number_findings(res: RunResult) -> None:
 def _fix_duplicate_chains(res: RunResult) -> None:
     by_id = {f.fid: f for f in res.findings}
     for f in res.findings:
-        if f.duplicate_of and not by_id[f.duplicate_of].kept:
+        if f.duplicate_of and (not f.kept or not by_id[f.duplicate_of].kept):
             f.duplicate_of = ""  # основная находка отклонена: дубль становится самостоятельной
     for f in res.findings:
         seen = {f.fid}
@@ -642,6 +824,50 @@ def _apply_dedup(res: RunResult, dd) -> int:
             f.duplicate_of = main.fid
             f.verifier_note = (f.verifier_note + " " if f.verifier_note else "") + f"Дубль: {g.reason}"
             merged += 1
+    _fix_duplicate_chains(res)
+    return merged
+
+
+SAME_FINDING_RATIO = 90  # порог похожести текста проблемы (rapidfuzz ratio) для слияния без модели
+CONTRADICTION = {"correct", "set_consistent"}  # критерии, под которыми модель записывает противоречия
+
+
+def _same_finding(a: Finding, b: Finding) -> bool:
+    """Одно и то же замечание: общая строка документа и почти одинаковый текст проблемы,
+    либо противоречие между ровно теми же строками документа."""
+    la, lb = {x.line for x in a.anchors}, {x.line for x in b.anchors}
+    if not la & lb:
+        return False
+    if la == lb and len(la) > 1 and {a.criterion, b.criterion} <= CONTRADICTION:
+        return True  # противоречие между теми же строками, описанное другими словами
+    ta = Grounder._normalize(a.problem)[0].strip(" .")
+    tb = Grounder._normalize(b.problem)[0].strip(" .")
+    return bool(ta) and (ta == tb or fuzz.ratio(ta, tb) >= SAME_FINDING_RATIO)
+
+
+def _merge_same_findings(res: RunResult) -> int:
+    """Страховка после верификатора: проходы по требованиям и по набору иногда возвращают
+    одну и ту же находку, а верификатор не помечает её дублем. Такие находки сливаются
+    в одну: остаётся более серьёзная, при равной серьёзности та, что раньше в списке."""
+    by_id = {f.fid: f for f in res.findings}
+    kept = [f for f in res.findings if f.kept]
+    pos = {f.fid: i for i, f in enumerate(kept)}
+    merged = 0
+    for f in kept:
+        if f.duplicate_of:
+            continue
+        for g in kept:
+            if g is f:
+                continue
+            root = by_id[g.duplicate_of] if g.duplicate_of else g
+            if root is f or not _same_finding(f, g):
+                continue
+            if (SEV_ORDER[f.severity], pos[f.fid]) < (SEV_ORDER[root.severity], pos[root.fid]):
+                continue  # f главнее: root станет дублем f, когда очередь дойдёт до него
+            f.duplicate_of = root.fid
+            f.verifier_note = (f.verifier_note + " " if f.verifier_note else "") + f"Дубль {root.fid}: тот же текст и место."
+            merged += 1
+            break
     _fix_duplicate_chains(res)
     return merged
 
@@ -708,25 +934,25 @@ def _reconcile_verdicts(res: RunResult) -> None:
     for r in res.requirements:
         cur = res.req_verdicts.setdefault(r.rid, {})
         for c in res.prof.requirement:
-            v, comment = cur.get(c.code, ("ok", ""))
+            v, comment = cur.get(c.code, ("unreviewed", ""))
             ids = sorted(set(viol.get((r.rid, c.code), [])))
             if ids:
                 cur[c.code] = ("violation", comment if v == "violation" else ", ".join(ids))
             elif v == "violation":
-                cur[c.code] = ("ok", "нарушение не подтверждено верификатором")
-            elif v not in ("ok", "na"):
-                cur[c.code] = ("ok", comment)
+                cur[c.code] = ("unreviewed", "Заявленное нарушение не подтверждено.")
+            else:
+                cur[c.code] = (v, comment)
     for c in res.prof.set:
         fs = [f for f in res.kept() if f.criterion == c.code]
-        v, comment = res.set_verdicts.get(c.code, ("ok", ""))
+        v, comment = res.set_verdicts.get(c.code, ("unreviewed", ""))
         if fs:
             worst = min(SEV_ORDER[f.severity] for f in fs)
             nv = "violation" if worst <= 1 else "partial"
             if v == "violation" or nv == "violation":
                 nv = "violation"
             res.set_verdicts[c.code] = (nv, comment)
-        elif v not in ("ok", "partial", "violation"):
-            res.set_verdicts[c.code] = ("ok", comment)
+        else:
+            res.set_verdicts[c.code] = (v if v == "ok" else "unreviewed", comment if v == "ok" else "")
 
 
 def _decide(res: RunResult) -> None:
@@ -734,14 +960,24 @@ def _decide(res: RunResult) -> None:
     crit = [f for f in kept if f.severity == "critical"]
     major = [f for f in kept if f.severity == "major"]
     test_blockers = [f for f in crit if f.criterion in ("verifiable", "correct", "set_consistent", "unambiguous", "complete")]
+    unresolved_review = (any(v == "unreviewed" for verdicts in res.req_verdicts.values() for v, _ in verdicts.values())
+                         or any(v == "unreviewed" for v, _ in res.set_verdicts.values())
+                         or any(c.status in ("unreviewed", "unclear") for c in res.acceptance_checks)
+                         or any(f.verification_status == "unreviewed" for f in res.findings)
+                         or {c.req_id for c in res.coverage} != {r.rid for r in res.requirements if r.kind == "functional"}
+                         or bool(res.lost_requirements))
     if crit:
         res.decision_dev = f"НЕЛЬЗЯ начинать (критичных дефектов: {len(crit)})"
+    elif unresolved_review:
+        res.decision_dev = "ГОТОВНОСТЬ НЕ ПОДТВЕРЖДЕНА (проверка неполная)"
     elif major:
         res.decision_dev = f"МОЖНО С ОГОВОРКАМИ (критичных дефектов нет, существенных: {len(major)})"
     else:
         res.decision_dev = "МОЖНО: критичных и существенных дефектов нет"
     if test_blockers:
         res.decision_test = f"НЕЛЬЗЯ проектировать тесты полностью (критичных дефектов, при которых ожидаемый результат не определён: {len(test_blockers)})"
+    elif unresolved_review:
+        res.decision_test = "ГОТОВНОСТЬ НЕ ПОДТВЕРЖДЕНА (проверка неполная)"
     elif crit or major:
         res.decision_test = "МОЖНО С ОГОВОРКАМИ: тесты на затронутые требования придётся пересмотреть после исправлений"
     else:
@@ -751,7 +987,7 @@ def _decide(res: RunResult) -> None:
 def _fallback_conclusion(res: RunResult) -> Conclusion:
     from .schemas import FixItem
 
-    top = sorted(res.kept(), key=lambda f: (SEV_ORDER[f.severity], f.fid))[:7]
+    top = sorted(res.open_findings(), key=lambda f: (SEV_ORDER[f.severity], f.fid))[:7]
     return Conclusion(
         development_rationale=f"{res.decision_dev}.",
         testing_rationale=f"{res.decision_test}.",

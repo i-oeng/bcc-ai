@@ -64,7 +64,9 @@ def test_full_loop(client):
     rid = j["run_id"]
     view = client.get(f"/api/runs/{rid}").json()
     assert view["summary"]["requirements"] > 0 and view["findings"] and view["questions"]
-    assert "<table>" in client.get(f"/api/runs/{rid}/report").text
+    page = client.get(f"/api/runs/{rid}/report")
+    assert "<table>" in page.text and page.text.startswith("<!doctype html>")
+    assert page.headers["content-security-policy"].startswith("sandbox")
     assert client.get(f"/api/runs/{rid}/report?format=md").text.startswith("#")
     assert client.get(f"/api/runs/{rid}/files/report").status_code == 200
     assert client.get(f"/api/runs/{rid}/files/fixed").status_code == 404

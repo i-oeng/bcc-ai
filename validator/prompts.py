@@ -45,9 +45,12 @@ def system(profile: Profile = DEFAULT) -> str:
 SYSTEM = system(DEFAULT)
 
 
-def segmentation(numbered_doc: str) -> str:
+def segmentation(numbered_doc: str, extracted: bool = False) -> str:
+    scope = ("Явно размеченные пункты и строки приёмки уже выделены локально и в тексте ниже опущены. "
+             "Выдели все оставшиеся требования. Заголовки и шапки таблиц оставлены для контекста.\n" if extracted else "")
     return f"""\
 Задача: выдели из документа все отдельные требования, которые будем проверять.
+{scope}
 
 Требование это утверждение о том, что система, процесс, интерфейс или данные должны делать или какими быть. \
 Включай:
@@ -82,20 +85,23 @@ def segmentation(numbered_doc: str) -> str:
 """
 
 
-def requirement_review(numbered_doc: str, batch: list[dict], profile: Profile = DEFAULT) -> str:
+def requirement_review(numbered_doc: str, batch: list[dict], profile: Profile = DEFAULT,
+                       missing: dict[str, list[str]] | None = None) -> str:
     items = "\n".join(
         f"- {r['rid']} (в документе: {r['doc_id']}; раздел: {r['section']}; строки {r['lines']}): «{r['quote']}»"
         for r in batch
     )
+    retry = f"Повторная проверка: верни только отсутствующие критерии для указанных ТР: {missing}.\n" if missing else ""
     return f"""\
 Задача: проверь каждое требование из списка ниже по всем критериям отдельного требования.
+{retry}
 
 Критерии (коды):
 {criteria_block(profile.requirement)}
 
 Для каждого требования верни:
-- verdicts: по одному на каждый из {len(profile.requirement)} критериев: verdict = ok | violation | na, comment = короткое обоснование \
-(до 25 слов) с привязкой к тексту.
+- verdicts: по одному на каждый из {len(profile.requirement)} критериев (при повторе только запрошенные). \
+verdict = ok | violation | na. Для ok и violation оставь comment пустым. Для na укажи краткую причину.
 - findings: по одной записи на каждый конкретный дефект (criterion, severity, quotes, problem, fix). \
 Если verdict = violation, должна быть хотя бы одна находка с этим критерием.
 
@@ -121,13 +127,17 @@ def requirement_review(numbered_doc: str, batch: list[dict], profile: Profile = 
 """
 
 
-def set_consistency(numbered_doc: str, req_table: str, known: str) -> str:
+def set_consistency(numbered_doc: str, req_table: str, known: str, acceptance: str = "") -> str:
     return f"""\
 Задача: проверь набор требований целиком на непротиворечивость (set_consistent) и корректность связей.
 
 Пройди систематически:
-1. Каждый критерий приёмки против функциональных требований: подставь значения, посчитай, сверь даты и часовые \
-пояса. Совпадает ли ожидаемый результат с тем, что следует из требований?
+1. Каждый пример приёмки из списка ниже против связанных правил: подставь значения, сверь даты и часовые пояса. \
+Верни в acceptance_checks хотя бы одну запись для каждого примера с ID связанного требования, расчётным результатом, \
+дословной цитатой ожидаемого результата из примера и статусом agrees, conflict или unclear. \
+Если связи нет, используй unclear с пустым req_id. Для conflict \
+сформулируй вопрос, который разрешит расхождение. Такие расхождения попадут в отчёт из acceptance_checks, \
+поэтому не повторяй их в findings.
 2. Функциональные требования попарно: нет ли правил, которые в каком-то сценарии требуют противоположного \
 (ограничение против исключения из него, значение по умолчанию против явного правила, два правила для одного события)?
 3. Цели и НФТ против функциональных требований и источника событий: выполнимы ли обещания по срокам и моменту \
@@ -147,6 +157,9 @@ def set_consistency(numbered_doc: str, req_table: str, known: str) -> str:
 
 Требования (ID отчёта | ID в документе | строки | суть):
 {req_table}
+
+Примеры приёмки для сверки:
+{acceptance or "(нет)"}
 
 Для verdicts верни оценку только по критерию set_consistent.
 
@@ -184,7 +197,7 @@ def set_completeness(numbered_doc: str, req_table: str, known: str, profile: Pro
 Требования (ID отчёта | ID в документе | строки | суть):
 {req_table}
 
-Для verdicts верни оценку по каждому из 7 критериев: ok | partial | violation.
+Для verdicts верни отдельную оценку по каждому перечисленному выше критерию: ok | partial | violation.
 
 Для coverage: по каждому функциональному требованию (kind functional) укажи, какие критерии приёмки (ТР-xx) его \
 проверяют, и перечисли его сценарии, которые не покрыты ни одним критерием (граница диапазона, выключенное состояние, \
@@ -197,7 +210,11 @@ def set_completeness(numbered_doc: str, req_table: str, known: str, profile: Pro
 """
 
 
-def verification(numbered_doc: str, findings_block: str) -> str:
+def verification(numbered_doc: str, findings_block: str, confirmed: str = "", others: str = "") -> str:
+    known = f"Уже подтверждены локальной сверкой (можно ссылаться как на оригинал дубля):\n{confirmed}\n\n" if confirmed else ""
+    if others:
+        known += ("Остальные находки этой проверки (их проверяет другой рецензент: решения по ним не возвращай, "
+                  f"но можешь указать их ID в duplicate_of):\n{others}\n\n")
     return f"""\
 Задача: ты независимый рецензент. Проверь находки другого ревьюера и правил. Для каждой находки реши:
 - keep = true, если дефект действительно есть в тексте документа, описан конкретно и привязан к цитате;
@@ -212,6 +229,7 @@ def verification(numbered_doc: str, findings_block: str) -> str:
 Будь строг к домыслам, но не отбрасывай реальные дефекты только потому, что они кажутся мелкими.
 Верни решение для каждой находки, ни одну не пропускай.
 
+{known}
 Находки:
 {findings_block}
 
