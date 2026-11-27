@@ -59,6 +59,7 @@ class Usage:
     seconds: float = 0.0
     model_versions: set[str] = field(default_factory=set)
     cached: int = 0
+    prompt_cached_tokens: int = 0  # часть входа, которую провайдер взял из своего кэша контекста (дешевле)
     steps: list[tuple[str, str]] = field(default_factory=list)  # шаг и модель, которая ответила
 
 
@@ -70,6 +71,7 @@ class Reply:
     prompt_tokens: int = 0
     output_tokens: int = 0
     thinking_tokens: int = 0
+    cached_tokens: int = 0
 
 
 # ---------- провайдеры ----------
@@ -123,7 +125,8 @@ class GeminiBackend(Backend):
         return Reply(parsed if isinstance(parsed, schema) else None, resp.text or "",
                      getattr(resp, "model_version", None) or model,
                      (um.prompt_token_count or 0) if um else 0, (um.candidates_token_count or 0) if um else 0,
-                     (getattr(um, "thoughts_token_count", 0) or 0) if um else 0)
+                     (getattr(um, "thoughts_token_count", 0) or 0) if um else 0,
+                     (getattr(um, "cached_content_token_count", 0) or 0) if um else 0)
 
     def list_models(self):
         out = []
@@ -206,7 +209,8 @@ class OpenAIBackend(Backend):
             raise ProviderError(kind, f"Ошибка API ({e.status_code}): {e}", e.status_code) from e
         u = getattr(resp, "usage", None)
         return Reply(result if isinstance(result, schema) else None, text, getattr(resp, "model", None) or model,
-                     getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0)
+                     getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0,
+                     cached_tokens=getattr(getattr(u, "prompt_tokens_details", None), "cached_tokens", 0) or 0)
 
     def list_models(self):
         return sorted(m.id for m in self.client.models.list())
@@ -258,7 +262,8 @@ class AnthropicBackend(Backend):
         text = next((b.text for b in resp.content if getattr(b, "type", "") == "text"), "")
         parsed = getattr(resp, "parsed_output", None)
         return Reply(parsed if isinstance(parsed, schema) else None, text, getattr(resp, "model", None) or model,
-                     resp.usage.input_tokens or 0, resp.usage.output_tokens or 0)
+                     resp.usage.input_tokens or 0, resp.usage.output_tokens or 0,
+                     cached_tokens=getattr(resp.usage, "cache_read_input_tokens", 0) or 0)
 
     def list_models(self):
         return [m.id for m in self.client.models.list()]
@@ -400,6 +405,7 @@ class LLMClient:
                         self.usage.prompt_tokens += reply.prompt_tokens
                         self.usage.output_tokens += reply.output_tokens
                         self.usage.thinking_tokens += reply.thinking_tokens
+                        self.usage.prompt_cached_tokens += reply.cached_tokens
                         self.usage.model_versions.add(reply.model)
                     if self.audit_dir:
                         (self.audit_dir / f"{n:02d}_{name}.response.json").write_text(reply.text, encoding="utf-8")

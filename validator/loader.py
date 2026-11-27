@@ -15,6 +15,31 @@ from pathlib import Path
 
 SUPPORTED = {".pdf", ".docx", ".md", ".markdown", ".txt", ".html", ".htm"}
 
+# хотя бы одна формулировка требования на русском, казахском или английском
+REQ_MARKERS = re.compile(
+    r"должн|необходим|требовани|обязан|нужно|следует|может|могут|позволя|обеспечива|"
+    r"shall|must|should|requir|тиіс|қажет|талап|мүмкін",
+    re.IGNORECASE,
+)
+MIN_LETTERS = 15  # «Система должна работать.» уже можно проверить
+
+
+class DocumentError(ValueError):
+    """Документ нельзя проверить (пустой, повреждён, под паролем, без текста).
+
+    Агент не падает, а пишет вместо отчёта понятную диагностику: что не так и что сделать.
+    """
+
+    def __init__(self, problem: str, advice: str = ""):
+        self.problem = problem
+        self.advice = advice
+        super().__init__(f"{problem} {advice}".strip())
+
+
+def _why(e: Exception) -> str:
+    msg = " ".join(str(e).split())[:140]
+    return f"техническая причина: {type(e).__name__}" + (f", {msg}" if msg else "")
+
 
 @dataclass
 class Document:
@@ -36,27 +61,46 @@ class Document:
 def load(path: str | Path) -> Document:
     p = Path(path)
     if not p.exists():
-        raise FileNotFoundError(f"Файл не найден: {p}")
+        raise DocumentError(f"Файл не найден: {p}.", "Проверьте путь к документу.")
+    if p.is_dir():
+        raise DocumentError(f"Указана папка, а не файл: {p}.", "Передайте путь к файлу документа.")
     ext = p.suffix.lower()
     if ext not in SUPPORTED:
-        raise ValueError(f"Формат {ext} не поддерживается. Поддерживаются: {', '.join(sorted(SUPPORTED))}")
+        raise DocumentError(
+            f"Формат {ext or '(без расширения)'} не поддерживается.",
+            f"Поддерживаются: {', '.join(sorted(SUPPORTED))}.",
+        )
     raw = p.read_bytes()
+    if not raw.strip():
+        raise DocumentError(
+            "Файл пустой (0 байт)." if not raw else "В файле только пробелы и переводы строк.",
+            "Передайте документ с текстом требований.",
+        )
     pages: list[int | None] | None = None
     if ext == ".pdf":
-        text, pages = _read_pdf(p)
-        n_pages = max(1, max((x for x in pages if x), default=1))
-        if len(re.sub(r"\s", "", text)) < 40 * n_pages:
-            raise ValueError(
-                f"В PDF почти нет текстового слоя ({n_pages} стр.): похоже на скан. Распознайте текст (OCR) "
-                "или передайте документ в DOCX/MD."
-            )
+        text, pages = _read_pdf_checked(p, raw)
     elif ext == ".docx":
-        text = _read_docx(p)
+        text = _read_docx_checked(p)
     elif ext in {".html", ".htm"}:
-        text = _read_html(_decode(raw))
+        text = _read_html(_decode_text(raw))
     else:
-        text = _decode(raw)
+        text = _decode_text(raw)
     text = _clean(text)
+    letters = len(re.findall(r"[^\W\d_]", text))
+    if letters == 0:
+        raise DocumentError("В документе нет текста: после чтения не осталось ни одной буквы.",
+                            "Передайте документ с текстом требований.")
+    if letters < MIN_LETTERS:
+        raise DocumentError(
+            f"Текста слишком мало для проверки требований ({letters} букв).",
+            "Похоже, документ обрезан или почти пуст. Передайте полный документ.",
+        )
+    if not REQ_MARKERS.search(text):
+        raise DocumentError(
+            "Это не похоже на документ требований: нет ни одной формулировки вида «система должна», "
+            "«необходимо», «требование», shall или must.",
+            "Проверьте, тот ли файл передан. Агент проверяет документы с требованиями (ТЗ, BRD, SRS, user stories).",
+        )
     doc = Document(path=p, fmt=ext.lstrip("."), text=text, sha256=hashlib.sha256(raw).hexdigest())
     doc.lines = text.split("\n")
     if pages and 0 <= len(doc.lines) - len(pages) <= 2:
@@ -68,7 +112,96 @@ def load(path: str | Path) -> Document:
     return doc
 
 
+def _decode_text(raw: bytes) -> str:
+    """Текстовый файл; двоичные данные под видом .txt/.md распознаются и не уходят в модель."""
+    text = _decode(raw)
+    sample = text[:65536]
+    ctrl = sum(1 for ch in sample if ord(ch) < 32 and ch not in "\t\n\r\f\v")
+    bad = sample.count("\ufffd")
+    if ctrl > len(sample) * 0.01 or bad > max(5, len(sample) * 0.01):
+        raise DocumentError(
+            "Файл не текстовый: внутри двоичные данные, а не текст.",
+            "Возможно, у файла неверное расширение или он повреждён. Передайте документ в PDF, DOCX, MD или TXT.",
+        )
+    return text
+
+
+def _read_pdf_checked(p: Path, raw: bytes) -> tuple[str, list[int | None]]:
+    if b"%PDF" not in raw[:1024]:
+        raise DocumentError(
+            "Файл назван .pdf, но это не PDF: в начале нет сигнатуры %PDF.",
+            "Файл повреждён или сохранён в другом формате. Откройте его и сохраните заново как PDF.",
+        )
+    import contextlib
+    import io
+
+    repaired = False
+    # PyMuPDF запоминает поток для служебных сообщений при первом импорте: глушим, как в _read_pdf
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            import pymupdf
+            import pymupdf4llm  # noqa: F401
+        except ImportError:
+            pymupdf = None
+    try:
+        if pymupdf is None:  # без PyMuPDF: проверку сделает pypdf в _read_pdf
+            raise LookupError
+        with pymupdf.open(str(p)) as d:
+            if d.needs_pass:
+                raise DocumentError("PDF защищён паролем: текст недоступен.",
+                                    "Сохраните копию без пароля и передайте её.")
+            if d.page_count == 0:
+                raise DocumentError("PDF повреждён: в нём нет ни одной страницы.",
+                                    "Сохраните документ заново или передайте его в DOCX/MD.")
+            repaired = bool(getattr(d, "is_repaired", False))
+    except DocumentError:
+        raise
+    except LookupError:
+        pass
+    except Exception as e:  # noqa: BLE001
+        raise DocumentError(f"PDF повреждён и не открывается ({_why(e)}).",
+                            "Откройте файл в программе просмотра и сохраните заново или передайте документ в DOCX/MD.") from e
+    try:
+        text, pages = _read_pdf(p)
+    except Exception as e:  # noqa: BLE001
+        raise DocumentError(f"Не удалось извлечь текст из PDF ({_why(e)}).",
+                            "Сохраните документ заново или передайте его в DOCX/MD.") from e
+    n_pages = max(1, max((x for x in pages if x), default=1))
+    if len(re.sub(r"\s", "", text)) < 40 * n_pages:
+        if repaired:
+            raise DocumentError("PDF повреждён (обрезан или испорчен): текст прочитать не удалось.",
+                                "Возьмите исходный файл заново или передайте документ в DOCX/MD.")
+        raise DocumentError(
+            f"В PDF почти нет текстового слоя ({n_pages} стр.): похоже на скан.",
+            "Распознайте текст (OCR) или передайте документ в DOCX/MD.",
+        )
+    return text, pages
+
+
+def _read_docx_checked(p: Path) -> str:
+    import zipfile
+
+    if not zipfile.is_zipfile(p):
+        raise DocumentError(
+            "Файл назван .docx, но не открывается как документ Word.",
+            "Файл повреждён, защищён паролем или это другой формат (например, старый .doc). "
+            "Сохраните документ в Word как .docx без пароля.",
+        )
+    with zipfile.ZipFile(p) as z:
+        names = set(z.namelist())
+    if "word/document.xml" not in names:
+        raise DocumentError("Архив DOCX не содержит текста документа (нет word/document.xml).",
+                            "Файл повреждён. Сохраните документ в Word заново.")
+    try:
+        return _read_docx(p)
+    except Exception as e:  # noqa: BLE001
+        raise DocumentError(f"DOCX повреждён и не читается ({_why(e)}).",
+                            "Сохраните документ в Word заново или передайте его в PDF/MD.") from e
+
+
 def _decode(raw: bytes) -> str:
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw.decode("utf-16")
     for enc in ("utf-8-sig", "cp1251"):
         try:
             return raw.decode(enc)

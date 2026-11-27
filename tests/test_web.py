@@ -199,3 +199,10 @@ def test_auto_retry_and_history_of_unfinished(client, monkeypatch):
     r = client.post(f"/api/runs/{failed[0]['id']}/retry")
     assert r.status_code == 202
     assert _wait(client, r.json()["id"])["status"] == "done"
+
+
+def test_broken_upload_explains_why(client):
+    r = client.post("/api/documents", files={"file": ("broken.pdf", b"not a pdf at all " * 50)})
+    assert r.status_code == 400 and "не PDF" in r.json()["detail"]
+    r = client.post("/api/documents", files={"file": ("empty.md", b"")})
+    assert r.status_code == 400 and "пустой" in r.json()["detail"]

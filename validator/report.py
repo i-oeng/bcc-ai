@@ -160,7 +160,10 @@ class Renderer:
             ("Маскирование данных", red_txt),
         ]
         if u:
-            rows.append(("Запросов к модели", f"{u.calls}; токенов: вход {u.prompt_tokens}, выход {u.output_tokens}"
+            pc = getattr(u, "prompt_cached_tokens", 0)
+            rows.append(("Запросов к модели", f"{u.calls}; токенов: вход {u.prompt_tokens}"
+                         + (f" (из кэша провайдера {pc}, {100 * pc // max(1, u.prompt_tokens)}%)" if pc else "")
+                         + f", выход {u.output_tokens}"
                          + (f", рассуждение {u.thinking_tokens}" if u.thinking_tokens else "")))
         if u and getattr(u, "cached", 0):
             rows.append(("Кэш ответов", f"шагов взято из кэша: {u.cached} (проверка продолжена после сбоя или повторена)"))
@@ -517,6 +520,59 @@ def write_extras(res: RunResult, report_path: str | Path) -> dict[str, Path]:
         fp.write_text(restore(res.fixed.markdown).strip() + "\n", encoding="utf-8")
         out["Исправленная редакция документа"] = fp
     return out
+
+
+def write_diagnostic(input_path: str | Path, err: Exception, out_path: str | Path) -> Path:
+    """Отчёт для документа, который нельзя проверить: что не так и что сделать, без запросов к модели."""
+    from datetime import datetime
+
+    from . import __version__
+
+    src = Path(input_path)
+    p = Path(out_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    problem = getattr(err, "problem", str(err))
+    advice = getattr(err, "advice", "")
+    try:
+        size = f"{src.stat().st_size:,} байт".replace(",", " ") if src.is_file() else "нет"
+    except OSError:
+        size = "нет"
+    lines = [
+        f"# Отчёт о проверке требований: {src.name}",
+        "",
+        "**Проверка не выполнена: документ нельзя прочитать.**",
+        "",
+        "Разработка: нельзя. Проектирование тестов: нельзя. Требования оценить невозможно, пока нет читаемого текста.",
+        "",
+        "| Параметр | Значение |",
+        "| :--- | :--- |",
+        f"| Файл | {src.name} |",
+        f"| Размер | {size} |",
+        f"| Дата | {datetime.now().astimezone():%d.%m.%Y %H:%M} |",
+        f"| Версия агента | {__version__} |",
+        "",
+        "## Что не так",
+        "",
+        problem,
+        "",
+    ]
+    if advice:
+        lines += ["## Что сделать", "", advice, ""]
+    lines += [
+        "## Что агент проверил перед разбором",
+        "",
+        "1. Файл существует, и это файл, а не папка.",
+        "2. Формат поддерживается: PDF, DOCX, Markdown, TXT, HTML.",
+        "3. Файл не пустой и действительно в своём формате (сигнатура PDF, архив DOCX, текст без двоичных данных).",
+        "4. PDF не защищён паролем, не повреждён и содержит текстовый слой, а не только сканы.",
+        "5. После чтения остаётся достаточно текста и есть хотя бы одна формулировка требования.",
+        "",
+        "Агент остановился на первой неудачной проверке. Запросы к модели не отправлялись: "
+        "разбирать было нечего, поэтому данные документа никуда не передавались.",
+        "",
+    ]
+    p.write_text("\n".join(lines), encoding="utf-8")
+    return p
 
 
 def write(res: RunResult, out_path: str | Path) -> Path:

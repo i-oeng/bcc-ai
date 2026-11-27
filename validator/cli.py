@@ -106,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     out = args.output or args.out_opt or str(Path("reports") / f"{Path(args.input).stem}_report.md")
 
     from . import pipeline, report
+    from .loader import DocumentError
 
     try:
         res = pipeline.run(args.input, cfg, dry_run=args.dry_run, answers_path=args.answers, fix=args.fix)
@@ -113,6 +114,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         path = report.write(res, out)
         extra = report.write_extras(res, path)
+    except DocumentError as e:
+        print(f"Документ нельзя проверить: {e}", file=sys.stderr)
+        if not args.dry_run:
+            print(f"Диагностика записана в отчёт: {report.write_diagnostic(args.input, e, out)}")
+        return 2
     except (LLMError, RedactionLeak, FileNotFoundError, ValueError, Cancelled) as e:
         print(f"Ошибка: {e}", file=sys.stderr)
         return 1

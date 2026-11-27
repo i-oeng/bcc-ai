@@ -663,7 +663,7 @@ p.error { animation: reveal .3s var(--ease), nudge .4s .05s var(--ease); }
    светло-серая страница, белые панели со скруглением 16 px без рамок, гротеск,
    плоские зелёные кнопки, выбранный пункт меню тёмной «таблеткой». */
 [data-theme="modern"] {
-  --m-font: "Inter", "Roboto Flex", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --m-font: "Onest", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --serif: var(--m-font);
   --sans: var(--m-font);
   --m-bg: #f5f5fa;
