@@ -628,7 +628,8 @@ def _help(sh: Shell, arg: str):
             ("/provider [claude|gemini|openai]", "провайдер модели, без запросов к ней"),
             ("/key", "ввести ключ скрыто; хранится в .env, в модель не уходит"),
             ("/baseurl URL", "свой сервер (Ollama, vLLM, OpenRouter)"),
-            ("/model [имя]", "показать или сменить модель"),
+            ("/model [N|имя]", "выбрать модель из списка (Tab подсказывает)"),
+            ("/models", "загрузить список моделей с ключа или сервера"),
             ("/standards [ieee830,ears]", "показать или выбрать стандарты"),
             ("/clear  /exit", "очистить экран, выйти (Ctrl+D)"),
         ]),
@@ -748,11 +749,74 @@ def _load(sh: Shell, arg: str):
     sh.summary()
 
 
+# Готовые модели по провайдерам, чтобы не набирать имена вручную. Claude: актуальная таблица моделей Anthropic.
+MODEL_CATALOG = {
+    "anthropic": [
+        ("claude-opus-5-5", "по умолчанию: точнее всего на длинных документах"),
+        ("claude-sonnet-5-5", "быстрее и в 2 раза дешевле Opus"),
+        ("claude-haiku-5-5", "самый быстрый и дешёвый"),
+        ("claude-fable-5-2", "самый сильный, дороже Opus"),
+        ("claude-opus-5", "прошлое поколение Opus"),
+        ("claude-sonnet-5", "прошлое поколение Sonnet"),
+        ("claude-opus-4-8", "Opus 4.8"),
+        ("claude-haiku-4-5", "Haiku 4.5"),
+    ],
+    "gemini": [
+        ("gemini-3.6-flash", "по умолчанию, бесплатный тариф"),
+        ("gemini-3.8-flash", "бесплатный тариф, 20 запросов в сутки"),
+        ("gemini-4-hydrogen", "бесплатный тариф"),
+        ("gemini-3.5-flash-lite", "быстрый, слабее"),
+        ("gemma-4-31b-it", "открытая модель"),
+    ],
+    "openai": [
+        ("gpt-5-mini", "по умолчанию"),
+        ("gpt-5", "сильнее и дороже"),
+        ("gpt-5-nano", "самый дешёвый"),
+        ("qwen3:8b", "Ollama, локально: /baseurl http://localhost:11434/v1"),
+        ("llama3.1:8b", "Ollama, локально"),
+    ],
+}
+
+
+def _models_for(sh: Shell) -> list[tuple[str, str]]:
+    """Готовый список провайдера и, если загружен через /models, реальный список с ключа или сервера."""
+    items = list(MODEL_CATALOG.get(sh.cfg.provider, []))
+    known = {m for m, _ in items}
+    items += [(m, "с вашего ключа") for m in getattr(sh, "_live_models", {}).get(sh.cfg.provider, []) if m not in known]
+    return items
+
+
 def _model(sh: Shell, arg: str):
+    from .config import PROVIDERS, save_env
+
+    items = _models_for(sh)
     if arg:
-        sh.cfg.model = arg
-    hang(grey("модель    "), cyan(sh.cfg.model))
-    hang(grey("запасные  "), ", ".join(sh.cfg.fallbacks) or "нет", style=grey)
+        name = items[int(arg) - 1][0] if arg.isdigit() and 0 < int(arg) <= len(items) else arg.strip()
+        sh.cfg.model = name
+        save_env(f"{PROVIDERS[sh.cfg.provider]['prefix']}_MODEL", name)
+        hang(green("● "), f"Модель {cyan(name)} ({sh.cfg.provider}), сохранена в .env. Модель не вызывалась.")
+        return
+    print()
+    for i, (m, meta) in enumerate(items, 1):
+        mark = green("●") if m == sh.cfg.model else " "
+        print(f"    {gold(str(i).rjust(2))} {mark} {cyan(m) if m == sh.cfg.model else m}  {grey(meta)}")
+    print()
+    say(grey("Выбрать: ") + gold("/model N") + grey(" или ") + gold("/model имя") + grey(" (Tab подсказывает). Полный список с ключа: ")
+        + gold("/models") + grey(". Запасные: ") + (", ".join(sh.cfg.fallbacks) or "нет"))
+
+
+def _models(sh: Shell, arg: str):
+    """Список моделей, доступных ключу или серверу: только имена, документ не отправляется."""
+    from .llm import make_backend
+
+    backend = make_backend(sh.cfg.provider, sh.cfg.api_key, sh.cfg.base_url)
+    names = in_background(lambda: sorted(set(backend.list_models())), "Загружаю список моделей")
+    names = [n.split("/", 1)[1] if n.startswith("models/") else n for n in names]
+    if not hasattr(sh, "_live_models"):
+        sh._live_models = {}
+    sh._live_models[sh.cfg.provider] = names
+    hang(green("● "), f"Доступно моделей: {len(names)}. Они добавлены в подсказки /model (Tab).")
+    _model(sh, "")
 
 
 def _standards(sh: Shell, arg: str):
@@ -833,7 +897,7 @@ def _exit(sh: Shell, arg: str):
 COMMANDS = {"help": _help, "?": _help, "check": _check, "dry": _dry, "findings": _findings, "f": _findings,
             "questions": _questions, "q": _questions, "summary": _summary, "report": _report, "open": _open,
             "history": _history, "load": _load, "model": _model, "standards": _standards, "clear": _clear,
-            "provider": _provider, "key": _key, "baseurl": _baseurl,
+            "provider": _provider, "key": _key, "baseurl": _baseurl, "models": _models,
             "exit": _exit, "quit": _exit}
 
 
@@ -843,9 +907,9 @@ DOC_EXT = (".pdf", ".docx", ".md", ".markdown", ".txt", ".html", ".htm")
 CMD_HELP = {
     "check": "проверить документ", "dry": "что ушло бы в модель, без запросов", "findings": "список нарушений",
     "questions": "вопросы заказчику", "summary": "итог ещё раз", "report": "путь к отчёту", "open": "открыть отчёт",
-    "history": "прошлые проверки", "load": "открыть прошлую проверку", "model": "показать или сменить модель",
+    "history": "прошлые проверки", "load": "открыть прошлую проверку", "model": "выбрать модель из списка",
     "standards": "выбрать стандарты", "provider": "gemini, anthropic (Claude), openai и совместимые",
-    "key": "ввести ключ скрыто (в модель не уходит)", "baseurl": "свой сервер: Ollama, vLLM, OpenRouter",
+    "key": "ввести ключ скрыто (в модель не уходит)", "models": "список моделей с вашего ключа или сервера", "baseurl": "свой сервер: Ollama, vLLM, OpenRouter",
     "clear": "очистить экран", "help": "все команды", "exit": "выход",
 }
 EXAMPLES = [
@@ -929,9 +993,11 @@ def _make_reader(sh: "Shell", pt_input=None, pt_output=None):
                         if k.startswith(arg.lower()):
                             yield Completion(k, -len(arg), display_meta=meta)
                 elif cmd == "model":
-                    for m in dict.fromkeys([sh.cfg.model, *sh.cfg.fallbacks]):
-                        if m.startswith(arg):
-                            yield Completion(m, -len(arg))
+                    seen = set()
+                    for m, meta in [*_models_for(sh), *((f, "запасная") for f in sh.cfg.fallbacks)]:
+                        if m not in seen and arg.lower() in m.lower():
+                            seen.add(m)
+                            yield Completion(m, -len(arg), display_meta=meta)
                 elif _PATHLIKE.match(text):
                     yield from path_completions(text)
                 return

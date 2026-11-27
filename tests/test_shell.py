@@ -53,3 +53,20 @@ def test_ids_and_example_questions_after_a_check(tmp_path):
     b = Buffer()
     b.text = "/hist"
     assert s.auto_suggest.get_suggestion(b, b.document).text == "ory"
+
+
+def test_model_suggestions_per_provider(tmp_path, monkeypatch):
+    from validator import config
+
+    monkeypatch.setattr(config, "env_path", lambda: tmp_path / ".env")  # настоящий .env не трогаем
+    sh, s = _reader()
+    sh.cfg.provider = "anthropic"
+    got = _complete(s, "/model cl")
+    assert got[:3] == ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+    assert "claude-sonnet-5-5" in _complete(s, "/model sonnet")
+    sh.cfg.provider = "openai"
+    assert {"gpt-5-mini", "gpt-5", "qwen3:8b"} <= set(_complete(s, "/model "))
+    sh._live_models = {"openai": ["deepseek-chat"]}
+    assert "deepseek-chat" in _complete(s, "/model deep")
+    shell._model(sh, "2")  # выбор по номеру
+    assert sh.cfg.model == "gpt-5" and "OPENAI_MODEL=gpt-5" in (tmp_path / ".env").read_text(encoding="utf-8")
