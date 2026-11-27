@@ -104,6 +104,13 @@ _RE_SECRETS = [
     re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_\-]{20,}"),  # OpenAI/Anthropic
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),  # GitHub
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),  # AWS
+    re.compile(r"\bgsk_[A-Za-z0-9]{20,}"),  # Groq
+    re.compile(r"\bhf_[A-Za-z0-9]{20,}"),  # Hugging Face
+    re.compile(r"\bxai-[A-Za-z0-9]{20,}"),  # xAI
+    re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}"),  # Stripe
+    re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),  # Slack
+    re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_-]{30,}"),  # Telegram bot
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)"),  # ключ PEM
     re.compile(r"(?i)\bbearer\s+(?!\$)[A-Za-z0-9._~+/\-]{20,}=*"),
     re.compile(r"(?i)\b(?:password|passwd|pwd|secret|api[_-]?key|token|пароль)\s*[=:]\s*(?![$<{])[^\s&'\"]{6,}"),
 ]

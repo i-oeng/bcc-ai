@@ -25,7 +25,7 @@ from typing import Callable, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from .redact import Redactor
+from .redact import RedactionLeak, Redactor
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -226,11 +226,15 @@ class AnthropicBackend(Backend):
         import anthropic
 
         self.anthropic = anthropic
-        self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout_s, max_retries=0)
+        # без ключа SDK сам найдёт учётные данные: ANTHROPIC_AUTH_TOKEN или профиль `ant auth login`
+        self.client = anthropic.Anthropic(api_key=api_key or None, timeout=timeout_s, max_retries=0)
+        # Claude Opus 5.5 по умолчанию думает на уровне medium; для ревью требований точность важнее скорости
+        self.effort = os.getenv("ANTHROPIC_EFFORT", "high").strip() or "high"
 
     def call(self, model, system, prompt, schema):
         a = self.anthropic
         kw = dict(model=model, max_tokens=16000, system=system, output_format=schema,
+                  output_config={"effort": self.effort},  # SDK добавит сюда формат ответа из output_format
                   messages=[{"role": "user", "content": prompt}])
         try:
             if model.startswith(self.FALLBACK_MODELS):
@@ -273,7 +277,7 @@ PROVIDERS = {"gemini": GeminiBackend, "openai": OpenAIBackend, "anthropic": Anth
 
 
 def make_backend(provider: str, api_key: str, base_url: str | None = None, temperature: float | None = None) -> Backend:
-    if not api_key and not (provider == "openai" and base_url):
+    if not api_key and not (provider == "openai" and base_url) and provider != "anthropic":
         hint = {"gemini": "GEMINI_API_KEY (ключ: https://aistudio.google.com/apikey)", "openai": "OPENAI_API_KEY",
                 "anthropic": "ANTHROPIC_API_KEY (ключ: https://platform.claude.com)"}.get(provider, "ключ API")
         raise LLMError(f"Не задан {hint}. Положите его в файл .env (см. .env.example) или впишите в настройках интерфейса.")
@@ -284,6 +288,15 @@ def make_backend(provider: str, api_key: str, base_url: str | None = None, tempe
     if provider == "anthropic":
         return AnthropicBackend(api_key)
     raise LLMError(f"Неизвестный провайдер {provider!r}. Доступны: {', '.join(PROVIDERS)}")
+
+
+def block_configured_keys(outgoing: str) -> None:
+    """Последний рубеж: значение любого настроенного ключа (*_API_KEY, *_TOKEN, *_SECRET в окружении и .env)
+    не может уйти в модель, даже если маскирование выключено (--no-redact). Найдено: запрос не отправляется."""
+    for name, value in os.environ.items():
+        v = (value or "").strip()
+        if len(v) >= 12 and name.upper().endswith(("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD")) and v in outgoing:
+            raise RedactionLeak(f"Запрос не отправлен: в тексте найдено значение {name}. Ключи и токены в модель не передаются.")
 
 
 # ---------- общий клиент ----------
@@ -347,6 +360,7 @@ class LLMClient:
         """
         self.check_stop()
         self.redactor.guard(system + "\n" + prompt)
+        block_configured_keys(system + "\n" + prompt)
         with self._lock:
             self.usage.calls += 1
             n = self.usage.calls

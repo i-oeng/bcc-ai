@@ -230,12 +230,14 @@ class Shell:
         from . import __version__
         from .criteria import profile
 
-        key = green("найден") if self.cfg.api_key else red("нет: впишите GEMINI_API_KEY в .env")
+        from .config import PROVIDERS
+
+        key = green("найден") if self.cfg.api_key else amber(f"нет: введите /key ({PROVIDERS[self.cfg.provider]['key']})")
         fb = f" {grey(f'(запасных: {len(self.cfg.fallbacks)})')}" if self.cfg.fallbacks else ""
         rows = [
             green("▌") + " " + bold("Агент проверки требований") + grey("  статическое ревью документа до разработки"),
             "",
-            f"  {grey('модель    ')}{cyan(self.cfg.model)}{fb}",
+            f"  {grey('модель    ')}{self.cfg.provider} {cyan(self.cfg.model)}{fb}",
             f"  {grey('ключ      ')}{key}",
             f"  {grey('стандарты ')}{profile(self.cfg.standards).titles()}",
             f"  {grey('отчёты    ')}{Path('reports').resolve()}",
@@ -257,10 +259,11 @@ class Shell:
 
     def loop(self) -> int:
         self.banner()
+        read = _make_reader(self) or (lambda: input("  " + green("› ") if _COLOR else "  > "))
         while True:
             rule(self.context())
             try:
-                line = input("  " + green("› ") if _COLOR else "  > ").strip()
+                line = read().strip()
             except EOFError:
                 print()
                 return 0
@@ -564,6 +567,9 @@ def _help(sh: Shell, arg: str):
         ]),
         ("Сессия", [
             ("/history  /load N", "прошлые проверки, открыть одну из них"),
+            ("/provider [claude|gemini|openai]", "провайдер модели, без запросов к ней"),
+            ("/key", "ввести ключ скрыто; хранится в .env, в модель не уходит"),
+            ("/baseurl URL", "свой сервер (Ollama, vLLM, OpenRouter)"),
             ("/model [имя]", "показать или сменить модель"),
             ("/standards [ieee830,ears]", "показать или выбрать стандарты"),
             ("/clear  /exit", "очистить экран, выйти (Ctrl+D)"),
@@ -702,6 +708,61 @@ def _standards(sh: Shell, arg: str):
     hang(grey("доступны   "), ", ".join(sorted(available())), style=grey)
 
 
+def _provider(sh: Shell, arg: str):
+    """Сменить провайдера без запросов к модели: gemini, anthropic (Claude), openai (и совместимые)."""
+    from .config import PROVIDERS, Config, save_env
+
+    if arg:
+        name = arg.strip().lower()
+        alias = {"claude": "anthropic", "google": "gemini", "gpt": "openai", "ollama": "openai", "openrouter": "openai"}
+        name = alias.get(name, name)
+        if name not in PROVIDERS:
+            return say(f"Нет провайдера {arg}. Доступны: {', '.join(PROVIDERS)} (claude = anthropic).", style=amber)
+        save_env("LLM_PROVIDER", name)
+        sh.cfg = Config.load(provider=name)
+    p = PROVIDERS[sh.cfg.provider]
+    hang(grey("провайдер  "), f"{p['title']} ({sh.cfg.provider})")
+    hang(grey("модель     "), cyan(sh.cfg.model))
+    hang(grey("ключ       "), green("задан") if sh.cfg.api_key else amber(f"нет: введите /key ({p['key']})"))
+    if sh.cfg.provider == "openai":
+        hang(grey("адрес      "), sh.cfg.base_url or grey("api.openai.com (свой сервер: /baseurl URL)"))
+    say(grey("Модель не вызывалась: настройки сохранены в .env."))
+
+
+def _key(sh: Shell, arg: str):
+    """Ввести ключ скрыто. Ключ сохраняется в .env и окружении процесса; в модель, журналы и историю не попадает."""
+    import getpass
+
+    from .config import PROVIDERS, Config, save_env
+
+    if arg.strip():
+        say("Не вводите ключ в строке команды: введите просто /key, и агент спросит его скрыто.", style=amber)
+        return None
+    name = PROVIDERS[sh.cfg.provider]["key"]
+    try:
+        value = getpass.getpass(f"  {name} (ввод скрыт, Enter: отмена): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        value = ""
+    if not value:
+        return say(grey("Ключ не изменён."))
+    save_env(name, value)
+    sh.cfg = Config.load(provider=sh.cfg.provider)
+    hang(green("● "), f"{name} сохранён в .env ({value[:4]}…{value[-2:]}, {len(value)} символов). Модель не вызывалась.")
+    return None
+
+
+def _baseurl(sh: Shell, arg: str):
+    """Адрес OpenAI-совместимого сервера: OpenRouter, DeepSeek, Groq, vLLM или Ollama в контуре банка."""
+    from .config import Config, save_env
+
+    if not arg:
+        return say("Пример: /baseurl http://localhost:11434/v1 (Ollama) или https://openrouter.ai/api/v1", style=amber)
+    save_env("OPENAI_BASE_URL", arg.strip())
+    save_env("LLM_PROVIDER", "openai")
+    sh.cfg = Config.load(provider="openai", base_url=arg.strip())
+    hang(green("● "), f"Провайдер openai, адрес {arg.strip()}. Модель: /model ИМЯ, ключ: /key (для Ollama не нужен).")
+
+
 def _clear(sh: Shell, arg: str):
     os.system("cls" if os.name == "nt" else "clear")
     sh.banner()
@@ -714,7 +775,189 @@ def _exit(sh: Shell, arg: str):
 COMMANDS = {"help": _help, "?": _help, "check": _check, "dry": _dry, "findings": _findings, "f": _findings,
             "questions": _questions, "q": _questions, "summary": _summary, "report": _report, "open": _open,
             "history": _history, "load": _load, "model": _model, "standards": _standards, "clear": _clear,
+            "provider": _provider, "key": _key, "baseurl": _baseurl,
             "exit": _exit, "quit": _exit}
+
+
+# ---------- подсказки и автодополнение (prompt_toolkit, если установлен) ----------
+
+DOC_EXT = (".pdf", ".docx", ".md", ".markdown", ".txt", ".html", ".htm")
+CMD_HELP = {
+    "check": "проверить документ", "dry": "что ушло бы в модель, без запросов", "findings": "список нарушений",
+    "questions": "вопросы заказчику", "summary": "итог ещё раз", "report": "путь к отчёту", "open": "открыть отчёт",
+    "history": "прошлые проверки", "load": "открыть прошлую проверку", "model": "показать или сменить модель",
+    "standards": "выбрать стандарты", "provider": "gemini, anthropic (Claude), openai и совместимые",
+    "key": "ввести ключ скрыто (в модель не уходит)", "baseurl": "свой сервер: Ollama, vLLM, OpenRouter",
+    "clear": "очистить экран", "help": "все команды", "exit": "выход",
+}
+EXAMPLES = [
+    "почему нельзя начинать разработку?",
+    "что исправить в первую очередь и почему?",
+    "объясни простыми словами самый опасный дефект",
+    "перепиши Ф-2 так, чтобы его можно было проверить",
+    "разбей Ф-3 на атомарные требования",
+    "составь тест-кейсы для Ф-1",
+    "предложи ответы на блокирующие вопросы",
+    "какие сценарии не покрыты критериями приёмки?",
+]
+_PATHLIKE = re.compile(r"^(~|\.{1,2}[\\/]|[A-Za-z]:|/[^/\s]*/|[^\s/\\]+[\\/])")
+
+
+def _make_reader(sh: "Shell", pt_input=None, pt_output=None):
+    """Строка ввода с меню подсказок, серыми подсказками и историей. Без prompt_toolkit: обычный input()."""
+    if pt_input is None and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.auto_suggest import AutoSuggest, AutoSuggestFromHistory, Suggestion
+        from prompt_toolkit.completion import Completer, Completion, PathCompleter
+        from prompt_toolkit.document import Document
+        from prompt_toolkit.formatted_text import HTML
+        from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.styles import Style
+    except ImportError:
+        return None
+
+    paths = PathCompleter(expanduser=True, file_filter=lambda p: os.path.isdir(p) or p.lower().endswith(DOC_EXT))
+
+    def path_completions(text: str):
+        sub = Document(text.strip("\"'"), len(text.strip("\"'")))
+        yield from paths.get_completions(sub, None)
+
+    def id_items():
+        r = sh.res
+        if not r:
+            return []
+        items = [(f.fid, _first_sentence(f.problem), f.severity) for f in r.open_findings()]
+        items += [(f"В-{i}", q.question, q.priority) for i, q in enumerate(r.questions, 1)]
+        items += [(q.rid, f"{q.doc_id}: {q.summary}", "req") for q in r.requirements]
+        return items
+
+    class ShellCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            if text.startswith("/") and " " not in text and not _PATHLIKE.match(text):
+                for name, meta in CMD_HELP.items():
+                    if name.startswith(text[1:].lower()):
+                        yield Completion("/" + name, -len(text), display="/" + name, display_meta=meta)
+                return
+            if text.startswith("/"):
+                cmd, _, arg = text[1:].partition(" ")
+                cmd = cmd.lower()
+                if cmd in ("check", "dry"):
+                    yield from path_completions(arg)
+                elif cmd in ("findings", "f"):
+                    for k, meta in (("крит", "критичные"), ("сущ", "существенные"), ("незн", "незначительные")):
+                        if k.startswith(arg.lower()):
+                            yield Completion(k, -len(arg), display_meta=meta)
+                elif cmd == "load":
+                    runs = sh._runs or []
+                    if not runs:
+                        from web import services
+
+                        runs = sh._runs = services.list_runs()[:15]
+                    for i, r in enumerate(runs, 1):
+                        if str(i).startswith(arg):
+                            yield Completion(str(i), -len(arg), display_meta=f"{r['id']}  {clip(r.get('title', ''), 40)}")
+                elif cmd == "standards":
+                    from .criteria import available
+
+                    last = arg.split(",")[-1].strip()
+                    for sid, st in sorted(available().items()):
+                        if sid.startswith(last):
+                            yield Completion(sid, -len(last), display_meta=clip(st.title, 40))
+                elif cmd == "provider":
+                    for k, meta in (("anthropic", "Claude"), ("gemini", "Google Gemini"), ("openai", "OpenAI и совместимые")):
+                        if k.startswith(arg.lower()):
+                            yield Completion(k, -len(arg), display_meta=meta)
+                elif cmd == "model":
+                    for m in dict.fromkeys([sh.cfg.model, *sh.cfg.fallbacks]):
+                        if m.startswith(arg):
+                            yield Completion(m, -len(arg))
+                elif _PATHLIKE.match(text):
+                    yield from path_completions(text)
+                return
+            m = re.match(r"^\s*([НнВв]|ТР|тр|Тр)(-?\d*)$", text)
+            if m and sh.res:
+                pre = text.strip().upper().replace("-", "")
+                for fid, meta, kind in id_items():
+                    if fid.upper().replace("-", "").startswith(pre):
+                        yield Completion(fid, -len(text), display_meta=clip(meta, 60))
+                return
+            if _PATHLIKE.match(text) or (text and " " not in text and any(
+                    e.name.lower().startswith(text.lower()) for e in os.scandir(".") if not e.name.startswith("."))):
+                yield from path_completions(text)
+                return
+            if sh.res and (not text or len(text) >= 2):
+                for q in EXAMPLES:
+                    if q.startswith(text.lower()) and q != text:
+                        yield Completion(q, -len(text), display_meta="спросить помощника")
+
+    class ShellSuggest(AutoSuggest):
+        """Серая подсказка: сначала из истории, затем команды и примеры вопросов. Принять: стрелка вправо."""
+
+        def __init__(self):
+            self.hist = AutoSuggestFromHistory()
+
+        def get_suggestion(self, buffer, document):
+            s = self.hist.get_suggestion(buffer, document)
+            if s and s.text:
+                return s
+            text = document.text
+            if not text:
+                return None
+            if text.startswith("/") and " " not in text:
+                hits = [n for n in CMD_HELP if n.startswith(text[1:].lower())]
+                return Suggestion(hits[0][len(text) - 1:]) if len(hits) == 1 else None
+            if sh.res and len(text) >= 3:
+                for q in EXAMPLES:
+                    if q.startswith(text.lower()):
+                        return Suggestion(q[len(text):])
+            return None
+
+    style = Style.from_dict({
+        "prompt": "#00ab75 bold",
+        "completion-menu": "bg:#24262d",
+        "completion-menu.completion": "bg:#24262d #e6e6e6",
+        "completion-menu.completion.current": "bg:#00ab75 #ffffff bold",
+        "completion-menu.meta.completion": "bg:#1e2026 #878a96",
+        "completion-menu.meta.completion.current": "bg:#008c60 #ffffff",
+        "auto-suggestion": "#5f6370",
+        "bottom-toolbar": "noreverse bg:default #6b6f7b",
+        "bottom-toolbar.key": "noreverse bg:default #dca86e",
+    })
+    hist_file = Path.home() / ".bcc_validator_history"
+
+    class SafeHistory(FileHistory):
+        """История без секретов: команда /key и строки с ключами на диск не пишутся."""
+
+        def store_string(self, string: str) -> None:
+            from .redact import _RE_SECRETS
+
+            keys = [v for k, v in os.environ.items() if k.endswith(("_API_KEY", "_TOKEN", "_SECRET")) and len(v) >= 12]
+            secret = (string.lstrip().startswith("/key") or any(rx.search(string) for rx in _RE_SECRETS)
+                      or any(v in string for v in keys))
+            if secret:
+                return
+            super().store_string(string)
+
+    try:
+        history = SafeHistory(str(hist_file))
+    except OSError:
+        from prompt_toolkit.history import InMemoryHistory
+
+        history = InMemoryHistory()
+
+    def toolbar():
+        return HTML("  <key>Tab</key> подсказки  <key>→</key> принять серую подсказку  <key>↑↓</key> история  "
+                    "<key>/help</key> команды  <key>Ctrl+D</key> выход")
+
+    session = PromptSession(history=history, completer=ShellCompleter(), auto_suggest=ShellSuggest(),
+                            complete_while_typing=True, style=style, bottom_toolbar=toolbar,
+                            reserve_space_for_menu=6, input=pt_input, output=pt_output)
+    read = lambda: session.prompt([("class:prompt", "  › ")])  # noqa: E731
+    read.session = session  # для тестов: доступ к подсказкам
+    return read
 
 
 def _as_path(s: str) -> Path | None:

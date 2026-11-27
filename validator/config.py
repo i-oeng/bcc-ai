@@ -52,6 +52,44 @@ def _load_env(path: Path) -> None:
     load_dotenv(stream=io.StringIO(text))
 
 
+def env_path() -> Path:
+    """Файл .env проекта (рядом с README)."""
+    return Path(__file__).resolve().parent.parent / ".env"
+
+
+def save_env(name: str, value: str) -> Path:
+    """Записать переменную в .env, сохранив кодировку файла (UTF-16 от PowerShell или UTF-8).
+
+    Значение уходит только на диск и в окружение процесса: в модель и в журналы оно не попадает.
+    """
+    import re as _re
+
+    if not _re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+        raise ValueError(f"Недопустимое имя переменной: {name!r}")
+    if "\n" in value or "\r" in value:
+        raise ValueError("Значение не может содержать перевод строки")
+    path = env_path()
+    raw = path.read_bytes() if path.is_file() else b""
+    utf16 = raw.startswith((b"\xff\xfe", b"\xfe\xff"))
+    text = raw.decode("utf-16") if utf16 else raw.decode("utf-8-sig", errors="replace")
+    lines = text.splitlines()
+    line = f"{name}={value}"
+    for i, ln in enumerate(lines):
+        if _re.match(rf"\s*(export\s+)?{name}\s*=", ln):
+            lines[i] = line
+            break
+    else:
+        lines.append(line)
+    out = "\n".join(lines) + "\n"
+    path.write_bytes(out.encode("utf-16") if utf16 else out.encode("utf-8"))
+    try:
+        os.chmod(path, 0o600)  # только владелец (на Windows без эффекта)
+    except OSError:
+        pass
+    os.environ[name] = value
+    return path
+
+
 def _bool(name: str, default: bool) -> bool:
     v = os.getenv(name)
     if v is None or v.strip() == "":
