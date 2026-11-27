@@ -360,6 +360,20 @@ def run_view(res) -> dict:
     sev = Counter(f.severity for f in op)
     per_req = Counter(rid for f in op if f.scope == "requirement" for rid in f.req_ids)
     u = res.usage
+    checks = getattr(res, "acceptance_checks", [])
+    coverage_pairs = {(c.req_id, c.acceptance_id): c.status for c in checks if c.req_id}
+    coverage_rows = {c.req_id: c for c in res.coverage}
+    coverage = []
+    for q in res.requirements:
+        if q.kind != "functional":
+            continue
+        row = coverage_rows.get(q.rid)
+        ids = list(dict.fromkeys([*(row.acceptance_ids if row else []),
+                                   *(aid for rid, aid in coverage_pairs if rid == q.rid)]))
+        coverage.append({"req_id": q.rid, "acceptance_ids": ids,
+                         "acceptance_statuses": {aid: coverage_pairs.get((q.rid, aid), "unreviewed") for aid in ids},
+                         "reviewed": row is not None,
+                         "missing_scenarios": [t(s) for s in row.missing_scenarios] if row else []})
     anchor = lambda a: {"text": t(a.text, model=False), "where": a.where(), "line": a.line, "line_end": a.line_end,  # noqa: E731
                         "page": a.page, "section": a.section}
     return {
@@ -370,7 +384,9 @@ def run_view(res) -> dict:
         "agent_version": res.agent_version,
         "summary": {"requirements": len(res.requirements), "open": len(op), "closed": len(res.kept()) - len(op),
                     "critical": sev["critical"], "major": sev["major"], "minor": sev["minor"],
-                    "questions": len(res.questions), "rejected": sum(1 for f in res.findings if not f.kept)},
+                    "questions": len(res.questions),
+                    "rejected": sum(not f.kept and f.verification_status != "unreviewed" for f in res.findings),
+                    "unreviewed_findings": sum(f.verification_status == "unreviewed" for f in res.findings)},
         "decision": {"development": res.decision_dev, "testing": res.decision_test,
                      "development_rationale": t(res.conclusion.development_rationale) if res.conclusion else "",
                      "testing_rationale": t(res.conclusion.testing_rationale) if res.conclusion else "",
@@ -397,15 +413,17 @@ def run_view(res) -> dict:
         "answers": [{"id": a.qid, "answer": a.answer} for a in res.answers],
         "checklist": [{"item": t(c.item, model=False), "answer": c.answer, "rationale": t(c.rationale),
                        "finding_ids": c.finding_ids} for c in res.checklist],
-        "coverage": [{"req_id": c.req_id, "acceptance_ids": c.acceptance_ids, "missing_scenarios": [t(s) for s in c.missing_scenarios]}
-                     for c in res.coverage],
+        "coverage": coverage,
+        "acceptance_checks": [{**c.model_dump(), "expected": t(c.expected), "stated": t(c.stated),
+                               "question": t(c.question)} for c in checks],
         "standards": [{"id": s.id, "title": s.title} for s in res.prof.standards],
         "criteria": [{"code": c.code, "name": c.name, "column": c.column, "source": c.source}
                      for c in res.prof.requirement],
         "elapsed": round((res.finished - res.started).total_seconds()) if res.finished else None,
         "passport": {"model": res.config.model, "provider": getattr(res.config, "provider", "gemini"), "calls": getattr(u, "calls", 0), "cached": getattr(u, "cached", 0),
                      "steps": [{"step": s, "model": m} for s, m in (u.steps if u else [])],
-                     "masking": res.redactor.stats() if res.redactor else {}, "warnings": res.warnings},
+                     "masking": res.redactor.stats() if res.redactor else {}, "warnings": res.warnings,
+                     "phase_seconds": getattr(res, "phase_seconds", {})},
         "has_fixed": res.fixed is not None,
     }
 

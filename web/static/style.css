@@ -509,3 +509,132 @@ table.doclist thead { display: none; }
   table.history td { padding: 1px 12px; border: none; }
 }
 @media (max-width: 430px) { .toptabs { gap: 1px; padding: 0 3px; } .toptabs a, .toptabs button { padding: 3px 5px 2px; font-size: 13px; } .toptabs #theme-toggle { padding: 3px 7px 2px; } .toptabs button { margin-left: 2px; } }
+
+/* ---------- движение: наведение, нажатие, появление ---------- */
+:root {
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --spring: cubic-bezier(.34, 1.56, .64, 1);
+  --t-fast: .12s;
+  --t: .2s;
+}
+
+/* кнопки: приподнимаются при наведении, вдавливаются при нажатии, от точки нажатия расходится круг */
+.btn, button, .toptabs a, input[type=file]::file-selector-button {
+  position: relative; overflow: hidden;
+  transition: transform var(--t) var(--spring), box-shadow var(--t) var(--ease), border-color var(--t) var(--ease),
+              filter var(--t) var(--ease), color var(--t) var(--ease), background-color var(--t) var(--ease);
+}
+.btn:hover:not(:disabled), button:not(.link):not(.segmented button):hover:not(:disabled),
+input[type=file]::file-selector-button:hover {
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 #fff, 0 3px 7px rgba(0, 0, 0, .18);
+}
+.btn.primary:hover:not(:disabled) {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .6), 0 0 0 3px rgba(0, 171, 117, .2), 0 4px 10px rgba(0, 90, 60, .3);
+  filter: saturate(1.2) brightness(1.04);
+}
+.btn:active:not(:disabled), button:not(.link):active:not(:disabled), input[type=file]::file-selector-button:active {
+  transform: translateY(0) scale(.96);
+  transition-duration: var(--t-fast);
+}
+.ripple {
+  position: absolute; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, rgba(255, 255, 255, .7) 0, rgba(255, 255, 255, .25) 40%, transparent 70%);
+  transform: scale(0); animation: ripple .5s var(--ease) forwards;
+}
+.btn:not(.primary) .ripple, button:not(.primary) .ripple, .toptabs a .ripple {
+  background: radial-gradient(circle, rgba(0, 171, 117, .28) 0, rgba(0, 171, 117, .1) 40%, transparent 70%);
+}
+@keyframes ripple { to { transform: scale(1); opacity: 0; } }
+
+/* текстовые ссылки-кнопки: подчёркивание проявляется плавно */
+a, button.link { transition: color var(--t) var(--ease), text-decoration-color var(--t) var(--ease); text-underline-offset: 2px; }
+button.link { text-decoration-color: rgba(0, 141, 96, .35); }
+button.link:hover:not(:disabled) { text-decoration-color: currentColor; }
+button.link:active:not(:disabled) { transform: scale(.97); }
+
+/* вкладки: приподнимаются, зелёная полоска выбранной вкладки выезжает */
+.toptabs a, .toptabs button { transition: transform var(--t) var(--spring), box-shadow .25s var(--ease), background var(--t); }
+.toptabs a:hover:not(.active), .toptabs button:hover { transform: translateY(-2px); }
+.toptabs a:active, .toptabs button:active { transform: translateY(0) scale(.97); }
+.toptabs a.active { animation: tab-on .3s var(--ease); }
+@keyframes tab-on { from { box-shadow: inset 0 0 0 var(--green); } }
+#theme-toggle svg { transition: transform .45s var(--spring); }
+#theme-toggle:hover svg { transform: rotate(-25deg); }
+#theme-toggle[aria-pressed="true"] svg { transform: rotate(180deg); }
+
+/* сегменты фильтра и подсказки помощника */
+.segmented button { transition: background var(--t) var(--ease), color var(--t) var(--ease); }
+.segmented button:hover:not(.on) { background: linear-gradient(#fff, #f6f6f6 48%, #ebebeb 52%, #f5f5f5); }
+.segmented button:active { transform: scale(.95); }
+.segmented button.on { animation: seg-on .25s var(--spring); }
+@keyframes seg-on { from { filter: brightness(1.25); } }
+.chip:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--green-dk); }
+
+/* поля: кольцо фокуса проявляется, а не выскакивает */
+input:not([type=checkbox]):not([type=radio]):not([type=file]), select, textarea {
+  transition: border-color var(--t) var(--ease), box-shadow var(--t) var(--ease);
+}
+.check input, input[type=radio] { transition: transform var(--t) var(--spring); }
+.check input:active, input[type=radio]:active { transform: scale(.85); }
+
+/* карточки: приподнимаются при наведении, стрелка поворачивается с пружиной, содержимое выезжает */
+.card { transition: transform var(--t) var(--ease), box-shadow var(--t) var(--ease), border-color var(--t) var(--ease), opacity var(--t); }
+.card:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(0, 0, 0, .09); border-color: #8f8f8f; }
+.card[open] { box-shadow: 0 3px 12px rgba(0, 0, 0, .08); }
+.card > summary { transition: background var(--t) var(--ease); }
+.card > summary::after, details.more > summary::before { transition: transform .3s var(--spring), color var(--t); }
+.card > summary:hover::after, details.more > summary:hover::before { color: var(--green-dk); }
+.card > summary:active { background: var(--green-lt); }
+.card[open] > .card-body, details.more[open] > :not(summary), details.advanced[open] > :not(summary),
+details.inline[open] > :not(summary) { animation: reveal .26s var(--ease); }
+details.more > summary { transition: color var(--t) var(--ease), padding-left var(--t) var(--ease); }
+details.more > summary:hover { color: var(--green-dk); padding-left: 6px; }
+@keyframes reveal { from { opacity: 0; transform: translateY(-6px); } }
+
+/* строки таблиц */
+tbody tr td { transition: background-color var(--t-fast) var(--ease); }
+
+/* страницы и панели появляются плавно */
+.view:not([hidden]) { animation: view-in .32s var(--ease); }
+@keyframes view-in { from { opacity: 0; transform: translateY(8px); } }
+.sheet:not([hidden]) { animation: sheet-in .28s var(--ease); transform-origin: top right; }
+@keyframes sheet-in { from { opacity: 0; transform: translateY(-10px) scale(.98); } }
+.assistant:not([hidden]) { animation: slide-in .32s var(--ease); }
+@keyframes slide-in { from { transform: translateX(100%); opacity: .4; } }
+body main { transition: margin .32s var(--ease); }
+.msg:last-child { animation: msg-in .3s var(--spring); transform-origin: bottom left; }
+.msg.user:last-child { transform-origin: bottom right; }
+@keyframes msg-in { from { opacity: 0; transform: translateY(6px) scale(.97); } }
+.newsbar:not([hidden]) { animation: sheet-in .3s var(--ease); }
+p.error, p.ok, .suggested { animation: reveal .3s var(--ease); }
+p.error { animation: reveal .3s var(--ease), nudge .4s .05s var(--ease); }
+@keyframes nudge { 25% { transform: translateX(-4px); } 50% { transform: translateX(3px); } 75% { transform: translateX(-2px); } }
+
+/* новый результат: вердикт и карточки появляются по очереди */
+.entering .verdict { animation: view-in .4s var(--ease) both; }
+.entering .res-section { animation: view-in .45s var(--ease) both; animation-delay: .12s; }
+.entering .card { animation: view-in .4s var(--ease) both; }
+.entering .card:nth-child(1) { animation-delay: .08s; }
+.entering .card:nth-child(2) { animation-delay: .13s; }
+.entering .card:nth-child(3) { animation-delay: .18s; }
+.entering .card:nth-child(4) { animation-delay: .23s; }
+.entering .card:nth-child(5) { animation-delay: .28s; }
+.entering .card:nth-child(6) { animation-delay: .33s; }
+.entering .card:nth-child(7) { animation-delay: .38s; }
+.entering .card:nth-child(n+8) { animation-delay: .42s; }
+
+/* перетаскивание файла: рамка оживает */
+.drop-target { transition: border-color var(--t) var(--ease), background-color var(--t) var(--ease), transform var(--t) var(--spring); }
+#drop-zone.over .drop-target { transform: scale(1.01); animation: drop-pulse 1s var(--ease) infinite; }
+@keyframes drop-pulse { 50% { box-shadow: 0 0 0 5px rgba(0, 171, 117, .15); } }
+
+/* смена темы: цвета перетекают */
+.theme-fade, .theme-fade body, .theme-fade .navbar, .theme-fade :is(.hero, .tagline, .footer, details.more, details.more > summary) {
+  transition: background-color .4s var(--ease), color .4s var(--ease), border-color .4s var(--ease) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .btn:hover, button:hover, .card:hover, .toptabs a:hover, .toptabs button:hover { transform: none !important; }
+}

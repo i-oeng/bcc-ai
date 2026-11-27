@@ -38,7 +38,6 @@ const api = {
   stopJob: (id) => api.call("POST", `/api/jobs/${id}/stop`),
   runs: () => api.call("GET", "/api/runs"),
   run: (id) => api.call("GET", `/api/runs/${encodeURIComponent(id)}`),
-  reportHtml: (id) => api.call("GET", `/api/runs/${encodeURIComponent(id)}/report`),
   fileUrl: (id, kind) => `/api/runs/${encodeURIComponent(id)}/files/${kind}`,
   answer: (id, answers, options) => api.call("POST", `/api/runs/${encodeURIComponent(id)}/answers`, { answers, options }),
   assistant: (id, question, history, focus, options) => api.call("POST", `/api/runs/${encodeURIComponent(id)}/assistant`, { question, history, focus, options }),
@@ -360,13 +359,15 @@ async function showResult(runId) {
     state.filter = { sev: "", text: "", shown: PAGE };
     document.querySelectorAll("details.more").forEach((d) => { d.open = false; });
     assistant.reset();
+    motion.enter($("#res-body"));
   }
   const r = state.run;
   $("#res-title").textContent = r.document.title || docName(r.document.name);
   $("#tab-result").hidden = false;
   $("#res-meta").textContent = `${docName(r.document.name)} / ${new Date(r.started).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" })}`;
   const files = [["report", "отчёт"], ["questions", "вопросы"], ...(r.has_fixed ? [["fixed", "исправленная редакция"]] : []), ["result", "JSON"]];
-  $("#res-files").innerHTML = "Скачать: " + files.map(([k, l]) => `<a href="${api.fileUrl(r.id, k)}">${esc(l)}</a>`).join(" / ");
+  $("#res-files").innerHTML = `<a href="/api/runs/${encodeURIComponent(r.id)}/report" target="_blank" rel="noopener">Полный отчёт</a> / Скачать: `
+    + files.map(([k, l]) => `<a href="${api.fileUrl(r.id, k)}">${esc(l)}</a>`).join(" / ");
   renderVerdict(r); renderSevFilter(r); renderFindings(r); renderQuestions(r); renderMore(r);
   if (draft.runId !== r.id) { $("#draft-editor").hidden = true; $("#draft-out").innerHTML = ""; await draft.load(); }
 }
@@ -374,6 +375,7 @@ async function showResult(runId) {
 function verdictWord(text) {
   const t = String(text || "").toUpperCase();
   if (t.startsWith("НЕЛЬЗЯ")) return ["stop", "нельзя"];
+  if (t.startsWith("ГОТОВНОСТЬ НЕ ПОДТВЕРЖДЕНА")) return ["warn", "проверка неполная"];
   if (t.includes("ОГОВОРК")) return ["warn", "с оговорками"];
   return ["go", "можно"];
 }
@@ -386,7 +388,7 @@ function renderVerdict(r) {
   $("#res-verdict").className = `verdict box ${cls}`;
   $("#res-verdict").innerHTML = `
     <div class="verdict-main">
-      <p class="verdict-line">Разработку начинать <b>${esc(word)}</b>. Тесты проектировать <b class="${tcls}">${esc(tword)}</b>.</p>
+      <p class="verdict-line">Разработка — <b>${esc(word)}</b>. Проектирование тестов — <b class="${tcls}">${esc(tword)}</b>.</p>
       <p class="muted">${esc(d.development_rationale || d.development)}${s.closed ? ` Закрыто ответами: ${s.closed}.` : ""}</p>
     </div>
     ${fix.length ? `<div class="verdict-fix">
@@ -520,7 +522,8 @@ async function onAnswers() {
 function renderMore(r) {
   $("#c-req").textContent = r.requirements.length;
   $("#c-check").textContent = r.checklist.length ? `${r.checklist.filter((c) => c.answer.toLowerCase() === "да").length} из ${r.checklist.length}` : "нет";
-  $("#c-cov").textContent = r.coverage.length ? `без критериев: ${r.coverage.filter((c) => !c.acceptance_ids.length).length} из ${r.coverage.length}` : "";
+  const checks = r.acceptance_checks || [];
+  $("#c-cov").textContent = checks.length ? `проверка примеров: ${checks.length}` : "";
   $("#more-requirements").innerHTML = table(r.requirements, [
     ["id", "ID"], ["doc_id", "В документе"], ["summary", "Суть"], ["where", "Где"],
     ["open_findings", "Нарушений", (v, q) => (v ? `<button type="button" class="link" data-req="${esc(q.id)}">${v}</button>` : "")],
@@ -529,8 +532,16 @@ function renderMore(r) {
     b.onclick = () => { state.filter = { sev: "", text: b.dataset.req, shown: 50 }; $("#f-text").value = b.dataset.req; renderSevFilter(r); renderFindings(r); $("#h-findings").scrollIntoView({ behavior: "smooth" }); };
   });
   $("#more-checklist").innerHTML = table(r.checklist, [["item", "Пункт"], ["answer", "Ответ"], ["rationale", "Обоснование"]]);
-  $("#more-coverage").innerHTML = table(r.coverage, [["req_id", "Требование"], ["acceptance_ids", "Критерии приёмки", (v) => esc(v.join(", ") || "нет")], ["missing_scenarios", "Не покрыто", (v) => esc(v.join("; "))]]);
-  const SET = { ok: "соответствует", partial: "частично", violation: "нарушено" };
+  const ACCEPTANCE = { agrees: "согласуется", conflict: "противоречие", unclear: "требует уточнения", unreviewed: "не проверено" };
+  $("#more-coverage").innerHTML = table(r.coverage, [
+    ["req_id", "Требование"],
+    ["acceptance_ids", "Связанные примеры", (v, c) => esc(v.map((id) => `${id} (${ACCEPTANCE[c.acceptance_statuses?.[id]] || "не проверено"})`).join(", ") || (c.reviewed ? "нет" : "не проверено"))],
+    ["missing_scenarios", "Не покрыто", (v, c) => esc(v.join(", ") || (c.reviewed ? "нет" : "не проверено"))],
+  ]) + (checks.length ? table(checks, [
+    ["acceptance_id", "Пример"], ["req_id", "Правило"], ["status", "Сверка", (v) => esc(ACCEPTANCE[v] || v)],
+    ["expected", "По правилу"], ["stated", "В примере"], ["question", "Вопрос"],
+  ]) : "");
+  const SET = { ok: "соответствует", partial: "частично", violation: "нарушено", unreviewed: "не проверено" };
   $("#more-set").innerHTML = table(r.set_verdicts, [["criterion_name", "Критерий"], ["verdict", "Оценка", (v) => esc(SET[v] || v)], ["comment", "Комментарий"]]);
   const p = r.passport, m = Object.entries(p.masking);
   $("#more-passport").innerHTML = `<dl class="kv">
@@ -952,9 +963,44 @@ function applyTheme(dark) {
   try { localStorage.setItem("validator.theme", dark ? "dark" : "light"); } catch (e) { /* без сохранения */ }
 }
 
+// ---------- движение: отклик кнопок на нажатие, плавное появление ----------
+const motion = {
+  calm: () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  init() {
+    // круг от точки нажатия, как у капли на стекле Aqua
+    document.addEventListener("pointerdown", (e) => {
+      const b = e.target.closest(".btn, button:not(.link), .toptabs a, .chip");
+      if (!b || b.disabled || motion.calm()) return;
+      const r = b.getBoundingClientRect();
+      const size = Math.max(r.width, r.height) * 2;
+      const dot = document.createElement("span");
+      dot.className = "ripple";
+      dot.style.cssText = `width:${size}px;height:${size}px;left:${e.clientX - r.left - size / 2}px;top:${e.clientY - r.top - size / 2}px`;
+      b.appendChild(dot);
+      dot.addEventListener("animationend", () => dot.remove());
+    });
+  },
+  enter(el) {
+    if (!el || motion.calm()) return;
+    el.classList.remove("entering");
+    void el.offsetWidth;  // перезапуск анимации
+    el.classList.add("entering");
+    clearTimeout(el._enterTimer);
+    el._enterTimer = setTimeout(() => el.classList.remove("entering"), 1400);
+  },
+  themeFade() {
+    if (motion.calm()) return;
+    const root = document.documentElement;
+    root.classList.add("theme-fade");
+    clearTimeout(root._fadeTimer);
+    root._fadeTimer = setTimeout(() => root.classList.remove("theme-fade"), 450);
+  },
+};
+
 async function init() {
   applyTheme(document.documentElement.dataset.theme === "dark");
-  $("#theme-toggle").onclick = () => applyTheme(document.documentElement.dataset.theme !== "dark");
+  $("#theme-toggle").onclick = () => { motion.themeFade(); applyTheme(document.documentElement.dataset.theme !== "dark"); };
+  motion.init();
   const showSettings = (on) => { $("#settings").hidden = !on; $("#settings-toggle").setAttribute("aria-expanded", String(on)); };
   $("#settings-toggle").onclick = () => showSettings($("#settings").hidden);
   $("#settings-close").onclick = () => showSettings(false);
@@ -988,12 +1034,6 @@ async function init() {
   $("#assistant-close").onclick = () => assistant.close();
   $("#ask").onsubmit = (e) => { e.preventDefault(); const v = $("#ask-input").value; $("#ask-input").value = ""; assistant.ask(v); };
   $("#ask-input").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#ask").requestSubmit(); } };
-  document.querySelector('details[data-more="report"]').addEventListener("toggle", (e) => {
-    if (e.target.open && state.run && !$("#report-frame").dataset.run?.startsWith(state.run.id)) {
-      $("#report-frame").dataset.run = state.run.id;
-      api.reportHtml(state.run.id).then((html) => { $("#report-frame").srcdoc = docPage(html); });
-    }
-  });
   window.addEventListener("hashchange", route);
 
   state.status = await api.status();

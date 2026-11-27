@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import html
 import mimetypes
 from pathlib import Path
 
@@ -312,12 +313,19 @@ def run(run_id: str):
     return services.run_view(_run(run_id))
 
 
+REPORT_CSP = "sandbox; default-src 'none'; style-src * 'unsafe-inline'; font-src *; img-src * data:"
+
+
 @app.get("/api/runs/{run_id}/report", response_class=HTMLResponse)
 def run_report(run_id: str, format: str = Query("html", pattern="^(html|md)$")):
     res = _run(run_id)
     if format == "md":
         return PlainTextResponse(services.report_markdown(res), media_type="text/markdown; charset=utf-8")
-    return HTMLResponse(services.report_html(res))
+    page = (f'<!doctype html><html lang="ru"><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<title>Отчёт / {html.escape(res.doc.path.name)}</title>'
+            f'<link rel="stylesheet" href="/static/doc.css"><body>{services.report_html(res)}</body></html>')
+    return HTMLResponse(page, headers={"Content-Security-Policy": REPORT_CSP})
 
 
 @app.get("/api/runs/{run_id}/files/{kind}")
