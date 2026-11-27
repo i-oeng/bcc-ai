@@ -9,7 +9,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import APP_NAME, __version__
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,7 +21,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = argparse.ArgumentParser(
         prog="python -m validator",
-        description="ИИ-агент статической проверки требований (ISO/IEC/IEEE 29148, IEEE 830 и другие стандарты). "
+        description=f"{APP_NAME} проверяет требования по ISO/IEC/IEEE 29148, IEEE 830 и другим стандартам. "
         "Читает документ (PDF, DOCX, MD, TXT, HTML) и пишет отчёт на русском в Markdown.",
     )
     ap.add_argument("input", nargs="?", help="путь к документу с требованиями")
@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--list-models", action="store_true", help="показать модели, доступные вашему ключу")
     ap.add_argument("--rerender", metavar="RUN_DIR",
                     help="перерисовать отчёт из сохранённой проверки runs/<...> без запросов к модели")
-    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    ap.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     args = ap.parse_args(argv)
 
     from .config import Config
