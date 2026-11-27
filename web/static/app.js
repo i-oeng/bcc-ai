@@ -953,15 +953,55 @@ function route() {
   if (page === "standards") stdPage.show();
 }
 
-function applyTheme(dark) {
-  if (dark) document.documentElement.dataset.theme = "dark";
-  else delete document.documentElement.dataset.theme;
-  const b = $("#theme-toggle");
-  b.title = dark ? "Светлая тема" : "Тёмная тема";
-  b.setAttribute("aria-label", "Тёмная тема");
-  b.setAttribute("aria-pressed", String(dark));
-  try { localStorage.setItem("validator.theme", dark ? "dark" : "light"); } catch (e) { /* без сохранения */ }
+const THEMES = { light: "Классическая", dark: "Тёмная", modern: "Современная" };
+
+function applyTheme(name) {
+  if (!THEMES[name]) name = "light";
+  if (name === "light") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = name;
+  $("#theme-toggle").title = `Оформление: ${THEMES[name]}`;
+  document.querySelectorAll("[data-theme-choice]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.themeChoice === name)));
+  try { localStorage.setItem("validator.theme", name); } catch (e) { /* без сохранения */ }
 }
+
+const themeMenu = {
+  isOpen: () => !$("#theme-menu").hidden,
+  open() {
+    const r = $("#theme-toggle").getBoundingClientRect();
+    const m = $("#theme-menu");
+    m.style.top = `${Math.round(r.bottom + 6)}px`;
+    m.style.right = `${Math.max(8, Math.round(window.innerWidth - r.right))}px`;
+    m.hidden = false;
+    $("#theme-toggle").setAttribute("aria-expanded", "true");
+    (m.querySelector('[aria-pressed="true"]') || m.querySelector("button")).focus();
+  },
+  close(refocus) {
+    if (!themeMenu.isOpen()) return;
+    $("#theme-menu").hidden = true;
+    $("#theme-toggle").setAttribute("aria-expanded", "false");
+    if (refocus) $("#theme-toggle").focus();
+  },
+  init() {
+    $("#theme-toggle").onclick = (e) => { e.stopPropagation(); themeMenu.isOpen() ? themeMenu.close() : themeMenu.open(); };
+    $("#theme-menu").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-theme-choice]");
+      if (!b) return;
+      motion.themeFade();
+      applyTheme(b.dataset.themeChoice);
+      themeMenu.close(true);
+      window.dispatchEvent(new Event("resize"));  // высота шапки у тем разная
+    });
+    $("#theme-menu").addEventListener("keydown", (e) => {
+      if (!["ArrowDown", "ArrowUp"].includes(e.key)) return;
+      e.preventDefault();
+      const items = [...$("#theme-menu").querySelectorAll("button")];
+      const i = items.indexOf(document.activeElement);
+      items[(i + (e.key === "ArrowDown" ? 1 : items.length - 1)) % items.length].focus();
+    });
+    document.addEventListener("click", (e) => { if (!e.target.closest("#theme-menu")) themeMenu.close(); });
+    window.addEventListener("resize", () => themeMenu.close());
+  },
+};
 
 // ---------- движение: отклик кнопок на нажатие, плавное появление ----------
 const motion = {
@@ -998,15 +1038,16 @@ const motion = {
 };
 
 async function init() {
-  applyTheme(document.documentElement.dataset.theme === "dark");
-  $("#theme-toggle").onclick = () => { motion.themeFade(); applyTheme(document.documentElement.dataset.theme !== "dark"); };
+  applyTheme(document.documentElement.dataset.theme || "light");
+  themeMenu.init();
   motion.init();
   const showSettings = (on) => { $("#settings").hidden = !on; $("#settings-toggle").setAttribute("aria-expanded", String(on)); };
   $("#settings-toggle").onclick = () => showSettings($("#settings").hidden);
   $("#settings-close").onclick = () => showSettings(false);
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    if (!$("#settings").hidden) showSettings(false); else if (!$("#assistant").hidden) assistant.close();
+    if (themeMenu.isOpen()) themeMenu.close(true);
+    else if (!$("#settings").hidden) showSettings(false); else if (!$("#assistant").hidden) assistant.close();
   });
   $("#opt-provider").onchange = () => { settings.fillProvider(settings.saved().perProvider?.[settings.provider()]); settings.read(); };
   $("#opt-key").oninput = (e) => { state.keys[settings.provider()] = e.target.value.trim(); settings.showKey(); };
