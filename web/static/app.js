@@ -156,6 +156,16 @@ function table(rows, cols, cls = "") {
 }
 
 const win = (title, body) => `<div class="box"><h2>${esc(title)}</h2>${body}</div>`;
+// ошибка запуска, загрузки или повтора: показывается под списком и убирается при следующей попытке
+function panelError(title, lines) {
+  const out = $("#preview");
+  out.innerHTML = win(title, lines.map((x) => `<p class="error">${esc(x)}</p>`).join(""));
+  out.dataset.kind = "error";
+}
+function panelClear() {
+  const out = $("#preview");
+  if (out.dataset.kind === "error") { out.innerHTML = ""; delete out.dataset.kind; }
+}
 const showError = (el, e) => { el.innerHTML = `<p class="error">${esc(e.message || e)}</p>`; };
 const fmtTime = (s) => (s >= 60 ? `${Math.floor(s / 60)} мин ${Math.round(s % 60)} с` : `${Math.round(s)} с`);
 
@@ -181,7 +191,8 @@ function renderDocs() {
 
 async function addFiles(files) {
   for (const f of files) {
-    try { addDoc(await api.upload(f)); } catch (e) { $("#preview").innerHTML = win("Ошибка загрузки", `<p class="error">${esc(f.name)}: ${esc(e.message)}</p>`); }
+    panelClear();
+    try { addDoc(await api.upload(f)); } catch (e) { panelError("Ошибка загрузки", [`${f.name}: ${e.message}`]); }
   }
 }
 
@@ -214,6 +225,7 @@ function setupDrop() {
 
 async function onPreview(docId) {
   const out = $("#preview"), doc = state.docs.find((d) => d.id === docId);
+  delete out.dataset.kind;
   const title = `Что уйдёт в модель: ${doc ? doc.name : ""}`;
   out.innerHTML = win(title, `<p class="muted">Маскирую локально, в модель ничего не уходит…</p>`);
   try {
@@ -234,13 +246,15 @@ async function onPreview(docId) {
 
 async function onRun() {
   const options = settings.read();
-  const started = [];
+  const started = [], failed = [];
+  panelClear();  // прошлая ошибка не должна висеть после повторного запуска
   for (const d of state.docs) {
     try {
       const j = await api.startJob(d.id, options);
       started.push(j.id);
-    } catch (e) { $("#preview").innerHTML = win("Не удалось запустить", `<p class="error">${esc(d.name)}: ${esc(e.message)}</p>`); }
+    } catch (e) { failed.push(`${d.name}: ${e.message}`); }
   }
+  if (failed.length) panelError(failed.length > 1 ? "Не удалось запустить проверки" : "Не удалось запустить", failed);
   state.autoOpen = started.length === 1 ? started[0] : null;
   if (started.length === 1) state.openLogs.add(started[0]);
   pollJobs();
@@ -322,7 +336,8 @@ function renderJobs() {
   document.querySelectorAll("[data-jretry]").forEach((b) => {
     b.onclick = async () => {
       b.disabled = true;
-      try { await api.call("POST", `/api/jobs/${b.dataset.jretry}/retry`); } catch (e) { $("#preview").innerHTML = win("Не удалось повторить", `<p class="error">${esc(e.message)}</p>`); }
+      panelClear();
+      try { await api.call("POST", `/api/jobs/${b.dataset.jretry}/retry`); } catch (e) { panelError("Не удалось повторить", [e.message]); }
       pollJobs();
     };
   });
