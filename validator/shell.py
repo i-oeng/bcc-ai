@@ -13,41 +13,107 @@ import re
 import shlex
 import shutil
 import sys
-import textwrap
 import threading
 import time
 from pathlib import Path
 
-# ---------- оформление ----------
+# ---------- палитра ----------
 
-_COLOR = sys.stdout.isatty() and not os.getenv("NO_COLOR")
+_COLOR = (sys.stdout.isatty() or bool(os.getenv("FORCE_COLOR"))) and not os.getenv("NO_COLOR")
 if _COLOR and os.name == "nt":
     os.system("")  # включить ANSI-последовательности в консоли Windows
+_TRUE = _COLOR and bool(os.getenv("WT_SESSION") or os.getenv("COLORTERM") in ("truecolor", "24bit")
+                        or os.getenv("TERM_PROGRAM") in ("vscode", "iTerm.app", "WezTerm"))
 
 
-def _c(code: str):
-    return (lambda s: f"\033[{code}m{s}\033[0m") if _COLOR else (lambda s: s)
+def _fg(rgb: tuple[int, int, int], basic: str):
+    if not _COLOR:
+        return lambda s: s
+    code = f"38;2;{rgb[0]};{rgb[1]};{rgb[2]}" if _TRUE else basic
+    return lambda s: f"\033[{code}m{s}\033[39m"
 
 
-bold, dim, green, red, yellow, cyan = _c("1"), _c("2"), _c("32"), _c("31"), _c("33"), _c("36")
-SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-SEV = {"critical": ("крит.", red), "major": ("сущ.", yellow), "minor": ("незн.", dim)}
+def _badge(bg: tuple[int, int, int], basic_bg: str, fg: str = "97"):
+    if not _COLOR:
+        return lambda s: f"[{s.strip()}]"
+    code = f"48;2;{bg[0]};{bg[1]};{bg[2]}" if _TRUE else basic_bg
+    return lambda s: f"\033[{code};{fg};1m{s}\033[0m"
+
+
+def _attr(on: str, off: str):
+    return (lambda s: f"\033[{on}m{s}\033[{off}m") if _COLOR else (lambda s: s)
+
+
+bold, dim, italic = _attr("1", "22"), _attr("2", "22"), _attr("3", "23")
+green = _fg((0, 171, 117), "32")      # фирменный зелёный BCC
+gold = _fg((220, 168, 110), "33")     # фирменное золото BCC
+red = _fg((235, 87, 87), "91")
+amber = _fg((242, 169, 59), "93")
+grey = _fg((135, 138, 150), "90")
+cyan = _fg((110, 190, 230), "96")
+yellow = amber
+B_CRIT = _badge((196, 52, 52), "41")
+B_MAJ = _badge((214, 145, 30), "43", "30")
+B_MIN = _badge((88, 92, 104), "100")
+B_OK = _badge((0, 140, 96), "42")
+SEV = {"critical": ("КРИТ", B_CRIT, red), "major": ("СУЩ ", B_MAJ, amber), "minor": ("НЕЗН", B_MIN, grey)}
+PRIO = {"blocking": ("БЛОК", B_CRIT), "important": ("ВАЖН", B_MAJ), "nice": ("ЖЕЛ ", B_MIN)}
 SEV_ARG = {"крит": "critical", "критичные": "critical", "critical": "critical", "сущ": "major", "существенные": "major",
            "major": "major", "незн": "minor", "незначительные": "minor", "minor": "minor"}
 ID_RE = re.compile(r"^\s*([НнВв]|ТР|тр)-?(\d+)\s*$")
+SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
+# ---------- вёрстка ----------
 
 
 def width() -> int:
-    return max(60, min(shutil.get_terminal_size((100, 30)).columns, 120))
+    return max(60, min(shutil.get_terminal_size((100, 30)).columns, 110))
+
+
+def vlen(s: str) -> int:
+    return len(ANSI.sub("", s))
+
+
+def wrap(text: str, w: int) -> list[str]:
+    """Перенос по видимой ширине: цветовые коды не считаются символами."""
+    w = max(10, w)
+    out: list[str] = []
+    for para in str(text).split("\n"):
+        line, n = "", 0
+        for word in para.split(" "):
+            k = vlen(word)
+            if n and n + 1 + k > w:
+                out.append(line)
+                line, n = word, k
+            elif line or n:
+                line, n = line + " " + word, n + 1 + k
+            else:
+                line, n = word, k
+        out.append(line)
+    return out
 
 
 def say(text: str = "", indent: int = 2, style=None) -> None:
     """Абзац с переносом по ширине терминала."""
-    pad = " " * indent
-    for para in str(text).split("\n"):
-        lines = textwrap.wrap(para, width() - indent - 1) or [""]
-        for ln in lines:
-            print(pad + (style(ln) if style else ln))
+    for ln in wrap(text, width() - indent - 1):
+        print(" " * indent + (style(ln) if style else ln))
+
+
+def hang(prefix: str, text: str, indent: int = 2, style=None) -> None:
+    """Строка с префиксом (значок, ID) и висячим отступом для переносов."""
+    pw = vlen(prefix)
+    lines = wrap(text, width() - indent - pw - 1)
+    for i, ln in enumerate(lines):
+        lead = prefix if i == 0 else " " * pw
+        print(" " * indent + lead + (style(ln) if style else ln))
+
+
+def md(s: str) -> str:
+    """**жирный** и `код` из ответов модели в оформление терминала."""
+    s = re.sub(r"\*\*(.+?)\*\*", lambda m: bold(m.group(1)), s)
+    return re.sub(r"`([^`]+)`", lambda m: cyan(m.group(1)), s)
 
 
 def clip(s: str, n: int) -> str:
@@ -57,6 +123,38 @@ def clip(s: str, n: int) -> str:
     cut = s[: n - 1]
     sp = cut.rfind(" ")
     return (cut[:sp] if sp > n * 0.6 else cut).rstrip(" ,;:.") + "…"
+
+
+def panel(rows: list[str], title: str = "", color=grey, right: str = "") -> None:
+    """Рамка со скруглёнными углами; строки уже свёрстаны по внутренней ширине (inner())."""
+    w = width() - 4
+    fill = w - 2 - (vlen(title) + 3 if title else 0) - (vlen(right) + 3 if right else 0)
+    top = (color("╭") + (color("─ ") + title + " " if title else "") + color("─" * max(1, fill))
+           + (" " + right + color(" ─") if right else "") + color("╮"))
+    print("  " + top)
+    for r in rows:
+        print("  " + color("│") + " " + r + " " * max(0, w - 4 - vlen(r)) + " " + color("│"))
+    print("  " + color("╰" + "─" * (w - 2) + "╯"))
+
+
+def inner() -> int:
+    return width() - 8
+
+
+def boxed(text: str, prefix: str = "", style=None) -> list[str]:
+    """Перенести текст по внутренней ширине рамки с висячим отступом под префиксом."""
+    pw = vlen(prefix)
+    lines = wrap(text, inner() - pw)
+    return [(prefix if i == 0 else " " * pw) + (style(ln) if style else ln) for i, ln in enumerate(lines)]
+
+
+def rule(label: str = "") -> None:
+    w = width() - 4
+    if label:
+        lab = f" {label} "
+        print("  " + grey("──") + grey(lab) + grey("─" * max(0, w - 2 - vlen(lab))))
+    else:
+        print("  " + grey("─" * w))
 
 
 class Spinner:
@@ -70,7 +168,8 @@ class Spinner:
             return
         self.i += 1
         secs = int(time.time() - self.t0)
-        sys.stdout.write(f"\r\033[K  {cyan(SPIN[self.i % len(SPIN)])} {self.title} {dim(f'{secs} с')}")
+        sys.stdout.write(f"\r\033[K  {green(SPIN[self.i % len(SPIN)])} {self.title}{grey('…')} {grey(f'{secs} с')}"
+                         f"  {grey(italic('Ctrl+C: стоп'))}")
         sys.stdout.flush()
 
     @staticmethod
@@ -102,6 +201,15 @@ def in_background(fn, title: str):
     return box.get("value")
 
 
+def _where(a) -> str:
+    return a.where().split(", раздел")[0]
+
+
+def _first_sentence(s: str) -> str:
+    m = re.match(r"(.+?[.!?])(\s|$)", (s or "").strip())
+    return m.group(1) if m and len(m.group(1)) > 25 else (s or "")
+
+
 # ---------- сессия ----------
 
 
@@ -114,6 +222,7 @@ class Shell:
         self.report_path: Path | None = None
         self.history: list[dict] = []  # диалог с помощником по текущей проверке
         self.stop = threading.Event()
+        self._runs: list[dict] = []
 
     # --- вход ---
 
@@ -121,22 +230,37 @@ class Shell:
         from . import __version__
         from .criteria import profile
 
-        key = green("ключ найден") if self.cfg.api_key else red("нет ключа: впишите его в .env")
-        line = "─" * (width() - 4)
+        key = green("найден") if self.cfg.api_key else red("нет: впишите GEMINI_API_KEY в .env")
+        fb = f" {grey(f'(запасных: {len(self.cfg.fallbacks)})')}" if self.cfg.fallbacks else ""
+        rows = [
+            green("▌") + " " + bold("Агент проверки требований") + grey("  статическое ревью документа до разработки"),
+            "",
+            f"  {grey('модель    ')}{cyan(self.cfg.model)}{fb}",
+            f"  {grey('ключ      ')}{key}",
+            f"  {grey('стандарты ')}{profile(self.cfg.standards).titles()}",
+            f"  {grey('отчёты    ')}{Path('reports').resolve()}",
+        ]
         print()
-        print("  " + dim("╭" + line + "╮"))
-        print("  " + dim("│") + bold("  Агент проверки требований") + dim(f"  {__version__}"))
-        print("  " + dim("│") + f"  {self.cfg.provider} {cyan(self.cfg.model)} / {key} / {profile(self.cfg.standards).titles()}")
-        print("  " + dim("╰" + line + "╯"))
-        say("Перетащите документ в это окно или введите путь (PDF, DOCX, MD, TXT, HTML). "
-            "После проверки спрашивайте о результате обычными словами. /help: все команды, /exit: выход.", style=dim)
+        panel(rows, color=green, right=grey(f"v{__version__}"))
         print()
+        say(f"{bold('Перетащите документ')} в это окно или введите путь (PDF, DOCX, MD, TXT, HTML).")
+        say(grey("После проверки спрашивайте о результате обычными словами.  ") + gold("/help") + grey(" команды  ")
+            + gold("/exit") + grey(" выход"))
+        print()
+
+    def context(self) -> str:
+        if not self.res:
+            return f"{self.cfg.model} / документ не открыт"
+        op = self.res.open_findings()
+        crit = sum(f.severity == "critical" for f in op)
+        return f"{clip(self.res.doc.title, 40)} / {len(op)} нарушений, {crit} крит. / {self.cfg.model}"
 
     def loop(self) -> int:
         self.banner()
         while True:
+            rule(self.context())
             try:
-                line = input(green("› ") if _COLOR else "> ").strip()
+                line = input("  " + green("› ") if _COLOR else "  > ").strip()
             except EOFError:
                 print()
                 return 0
@@ -147,21 +271,25 @@ class Shell:
                 continue
             try:
                 if self.dispatch(line) == "exit":
+                    say(grey("До встречи."))
                     return 0
             except KeyboardInterrupt:
                 Spinner.clear()
-                say("Прервано.", style=yellow)
+                say("Прервано.", style=amber)
             except Exception as e:  # noqa: BLE001
                 Spinner.clear()
-                say(f"Ошибка: {e}", style=red)
+                hang(red("● "), f"Ошибка: {e}", style=red)
             print()
 
     def dispatch(self, line: str):
+        path = _as_path(line)  # раньше команд: в Linux и macOS путь тоже начинается с «/»
+        if path:
+            return self.check(str(path))
         if line.startswith("/"):
             cmd, _, arg = line[1:].partition(" ")
             fn = COMMANDS.get(cmd.lower())
             if not fn:
-                say(f"Нет команды /{cmd}. Список: /help", style=yellow)
+                say(f"Нет команды /{cmd}. Список: /help", style=amber)
                 return None
             return fn(self, arg.strip())
         path = _as_path(line)
@@ -171,8 +299,8 @@ class Shell:
         if m and self.res:
             return self.show_id(m.group(1).upper(), int(m.group(2)))
         if not self.res:
-            say("Сначала проверьте документ: перетащите файл в окно или введите путь. Пример: "
-                "samples/requirements.pdf", style=yellow)
+            say("Сначала проверьте документ: перетащите файл в окно или введите путь, например "
+                + cyan("samples/requirements.pdf") + ". Прошлые проверки: " + gold("/history") + ".")
             return None
         return self.ask(line)
 
@@ -219,30 +347,37 @@ class Shell:
                     sp = Spinner(text.lstrip("▸ ").rstrip("…"))
                 elif text.startswith("готово за") and sp:
                     done = re.sub(r"^готово за \S+ с:?\s*", "", text)
-                    secs = int(time.time() - sp.t0)
-                    print(f"  {green('●')} {sp.title} {dim(f'{secs} с')}" + (f"  {dim(clip(done, width() - 40))}" if done else ""))
+                    secs = f"{int(time.time() - sp.t0)} с"
+                    head = f"{green('●')} {sp.title}"
+                    print("  " + head + " " * max(1, width() - 8 - vlen(head) - len(secs)) + grey(secs))
+                    if done:
+                        hang(grey("⎿ "), done, indent=4, style=grey)
                     sp = None
                 elif text.startswith(("Документ:", "Стандарты:", "Маскирование:", "Модель:")):
-                    say(text, style=dim)
-                elif text.startswith("пропущено") or "повтор через" in text or "ответ 4" in text or "ответ 5" in text:
-                    say(text, indent=4, style=yellow)
+                    k, _, v = text.partition(":")
+                    hang(grey(f"{k.lower():<13}"), v.strip(), indent=4, style=grey)
+                elif text.startswith("пропущено") or "повтор" in text or "ответ 4" in text or "ответ 5" in text \
+                        or "переключаюсь" in text or "молчит" in text:
+                    hang(amber("⎿ "), text, indent=4, style=amber)
                 elif text:
-                    say(text, indent=4, style=dim)
+                    hang(grey("⎿ "), text, indent=4, style=grey)
         except KeyboardInterrupt:
             Spinner.clear()
             self.stop.set()
-            say("Останавливаю после текущего шага (готовые шаги сохранены в кэше, повтор продолжит с места)…", style=yellow)
+            say("Останавливаю после текущего шага: готовые шаги сохранены, повтор продолжит с места…", style=amber)
             th.join()
         Spinner.clear()
         if "error" in box:
             e = box["error"]
             if isinstance(e, DocumentError):
-                say(f"Документ нельзя проверить: {e.problem}", style=red)
+                rows = boxed(e.problem, style=None)
                 if e.advice:
-                    say(e.advice)
+                    rows += [""] + boxed(e.advice, prefix=green("Что сделать  "))
+                print()
+                panel(rows, title=red("Документ нельзя проверить"), color=red)
                 return None
             if type(e).__name__ == "Cancelled":
-                say("Проверка остановлена.", style=yellow)
+                say("Проверка остановлена.", style=amber)
                 return None
             raise e
         res = box["res"]
@@ -253,11 +388,15 @@ class Shell:
         extras = report.write_extras(res, out)
         self.open_result(res, out)
         print()
-        say(f"Готово за {int(time.time() - t_all)} с.", style=dim)
-        self.summary()
-        say(f"Отчёт: {out}" + (f"  вопросы заказчику: {next(iter(extras.values()))}" if extras else ""), style=cyan)
-        say("Спросите что угодно о результате, например «почему нельзя начинать разработку?» или «перепиши Ф-2». "
-            "Или: /findings, /questions, Н-03, /open.", style=dim)
+        self.summary(seconds=int(time.time() - t_all))
+        print()
+        hang(grey("отчёт      "), cyan(str(out)))
+        if extras:
+            hang(grey("вопросы    "), cyan(str(next(iter(extras.values())))))
+        print()
+        say(grey("Дальше: спросите словами («почему нельзя начинать разработку?», «перепиши Ф-2»), введите ID ")
+            + cyan("Н-01") + grey(" или ") + gold("/findings") + grey(", ") + gold("/questions") + grey(", ")
+            + gold("/open") + grey("."))
         return None
 
     def open_result(self, res, path: Path | None) -> None:
@@ -265,80 +404,99 @@ class Shell:
 
     # --- показ результата ---
 
-    def summary(self) -> None:
+    def summary(self, seconds: int | None = None) -> None:
         r = self.res
         op = r.open_findings()
         n = {k: sum(1 for f in op if f.severity == k) for k in SEV}
-        stop_word = lambda s: red(s) if s.startswith(("НЕЛЬЗЯ", "ГОТОВНОСТЬ")) else green(s)  # noqa: E731
-        print()
-        print(f"  {bold('Разработка   ')} {stop_word(r.decision_dev)}")
-        print(f"  {bold('Тестирование ')} {stop_word(r.decision_test)}")
-        print(f"  {dim(f'{len(r.requirements)} требований / {len(op)} нарушений')} "
-              f"{red(str(n['critical']) + ' крит.')} {yellow(str(n['major']) + ' сущ.')} {dim(str(n['minor']) + ' незн.')} "
-              f"{dim(f'/ {len(r.questions)} вопросов заказчику')}")
+
+        def verdict(label: str, value: str) -> list[str]:
+            bad = value.startswith(("НЕЛЬЗЯ", "ГОТОВНОСТЬ"))
+            mark = red("●") if bad else (amber("●") if "ОГОВОРК" in value else green("●"))
+            col = red if bad else (amber if "ОГОВОРК" in value else green)
+            return boxed(value, prefix=f"{grey(label)}{mark} ", style=lambda s: col(bold(s)))
+
+        rows = verdict("Разработка    ", r.decision_dev) + verdict("Тестирование  ", r.decision_test)
+        rows.append("")
+        rows.append(f"{bold(str(len(r.requirements)))} {grey('требований')}   {bold(str(len(op)))} {grey('нарушений')}   "
+                    f"{bold(str(len(r.questions)))} {grey('вопросов заказчику')}")
+        total = max(1, len(op))
+        bar_w = max(10, inner() - 34)
+        parts = [(n["critical"], red), (n["major"], amber), (n["minor"], grey)]
+        cells = [max(1, round(bar_w * k / total)) if k else 0 for k, _ in parts]
+        cells[cells.index(max(cells))] += bar_w - sum(cells)
+        bar = "".join(c("█" * w) for (k, c), w in zip(parts, cells))
+        rows.append(f"{bar}  {red(str(n['critical']) + ' крит')} {grey('/')} {amber(str(n['major']) + ' сущ')} "
+                    f"{grey('/')} {grey(str(n['minor']) + ' незн')}")
+        right = grey(f"{seconds} с") if seconds is not None else ""
+        panel(rows, title="Итог", color=green, right=right)
         crit = [f for f in op if f.severity == "critical"]
         if crit:
             print()
-            print("  " + bold("Критичные дефекты"))
+            say(bold("Критичные дефекты"))
             for f in crit:
                 self._finding_line(f)
         if r.conclusion and r.conclusion.fix_first:
             print()
-            print("  " + bold("Что исправить в первую очередь"))
+            say(bold("Что исправить в первую очередь"))
             for i, it in enumerate(r.conclusion.fix_first[:5], 1):
-                say(f"{i}. {it.title.rstrip('.')}. {dim(', '.join(it.finding_ids))}", indent=4)
+                hang(gold(f"{i}. "), f"{it.title.rstrip('.')}. " + grey(", ".join(it.finding_ids)), indent=4)
 
     def _finding_line(self, f) -> None:
         r = self.res
-        label, color = SEV[f.severity]
+        label, badge, _ = SEV[f.severity]
         ids = ", ".join(dict.fromkeys(r.req(x).doc_id for x in f.req_ids if r.req(x))) or "документ"
         lines = ", ".join(map(str, sorted({a.line for a in f.anchors})[:3]))
-        head = f"{f.fid}  {label:<5} "
-        rest = f"{ids} / стр. {lines}  {_first_sentence(f.problem)}"
-        print("    " + color(head) + clip(rest, width() - len(head) - 6))
+        prefix = f"{badge(' ' + label + ' ')} {bold(f.fid)}  "
+        text = f"{ids} {grey('/ стр. ' + lines)}  {_first_sentence(f.problem)}"
+        print("    " + prefix + clip_ansi(text, width() - 6 - vlen(prefix)))
 
     def show_id(self, kind: str, num: int):
         r = self.res
         if kind == "Н":
             f = next((x for x in r.findings if x.fid == f"Н-{num:02d}"), None)
             if not f:
-                return say(f"Нет находки Н-{num:02d}.", style=yellow)
-            label, color = SEV[f.severity]
-            crit = r.prof.name(f.criterion)
-            print()
-            print(f"  {bold(f.fid)} {color(label)} {dim('/ ' + crit + ' / ' + ', '.join(f.req_ids))}"
-                  + (dim(f" / дубль {f.duplicate_of}") if f.duplicate_of else "")
-                  + (red(" / отклонена верификатором") if not f.kept else ""))
-            say(f.problem)
+                return say(f"Нет находки Н-{num:02d}.", style=amber)
+            label, badge, col = SEV[f.severity]
+            reqs = ", ".join(f"{x} {r.req(x).doc_id}" for x in f.req_ids if r.req(x)) or "документ целиком"
+            rows = boxed(md(f.problem)) + [""]
             for a in f.anchors:
-                say(f"«{clip(a.text, 300)}» ({a.where().split(', раздел')[0]})", indent=4, style=dim)
-            say(green("Исправить: ") + f.fix)
+                rows += boxed(f"«{clip(a.text.replace('**', ''), 260)}»  {_where(a)}", prefix=grey("│ "), style=grey)
+            rows += [""] + boxed(md(f.fix), prefix=green(bold("Исправить  ")))
             if f.verifier_note:
-                say(f"Верификатор: {f.verifier_note}", style=dim)
+                rows += [""] + boxed(f.verifier_note, prefix=grey("Верификатор  "), style=grey)
+            status = ""
+            if f.duplicate_of:
+                status = amber(f"дубль {f.duplicate_of}")
+            elif not f.kept:
+                status = red("отклонена верификатором")
+            title = f"{badge(' ' + label.strip() + ' ')} {bold(f.fid)} {grey(r.prof.name(f.criterion) + ' / ' + reqs)}"
+            print()
+            panel(rows, title=title, color=col, right=status)
         elif kind == "В":
             if not 1 <= num <= len(r.questions):
-                return say(f"Нет вопроса В-{num}.", style=yellow)
+                return say(f"Нет вопроса В-{num}.", style=amber)
             q = r.questions[num - 1]
-            print()
-            prio = {"blocking": "блокирующий", "important": "важный", "nice": "желательный"}.get(q.priority, q.priority)
-            print(f"  {bold(f'В-{num}')} {dim(prio + ' / ' + q.addressee + ' / ' + ', '.join(q.finding_ids))}")
-            say(q.question)
+            plabel, pbadge = PRIO.get(q.priority, ("?", B_MIN))
+            rows = boxed(md(q.question), style=bold) + [""]
             for i, o in enumerate(q.options, 1):
-                say(f"({i}) {o}", indent=4)
+                rows += boxed(o, prefix=gold(f"({i}) "))
             if q.why:
-                say(f"Почему важно: {q.why}", style=dim)
+                rows += [""] + boxed(q.why, prefix=grey("Зачем  "), style=grey)
+            print()
+            panel(rows, title=f"{pbadge(' ' + plabel.strip() + ' ')} {bold(f'В-{num}')} {grey(q.addressee)}",
+                  color=gold, right=grey(", ".join(q.finding_ids)))
         else:
             q = r.req(f"ТР-{num:02d}")
             if not q:
-                return say(f"Нет требования ТР-{num:02d}.", style=yellow)
-            print()
-            print(f"  {bold(q.rid)} {dim(q.doc_id + ' / ' + q.anchor.where().split(', раздел')[0])}")
-            say(f"«{clip(q.quote, 400)}»", style=dim)
+                return say(f"Нет требования ТР-{num:02d}.", style=amber)
+            rows = boxed(f"«{clip(q.quote.replace('**', ''), 500)}»", prefix=grey("│ "), style=grey)
             own = [f for f in r.open_findings() if q.rid in f.req_ids]
+            print()
+            panel(rows, title=f"{bold(q.rid)} {q.doc_id}", color=cyan, right=grey(_where(q.anchor)))
             for f in own:
                 self._finding_line(f)
             if not own:
-                say("Нарушений нет.", style=green)
+                hang(B_OK(" OK ") + " ", "Нарушений нет.", indent=4)
         return None
 
     # --- помощник ---
@@ -348,49 +506,78 @@ class Shell:
 
         o = services.default_options(self.cfg.provider)
         o.model = self.cfg.model
-        out = in_background(lambda: services.assistant(self.res, question, self.history, None, o), "думаю")
+        out = in_background(lambda: services.assistant(self.res, question, self.history, None, o), "Думаю")
         self.history += [{"role": "user", "content": question}, {"role": "assistant", "content": out["answer"]}]
         print()
-        say(out["answer"])
+        hang(green("● "), md(out["answer"]))
         if out.get("suggested_text"):
             print()
-            say(out["suggested_text"], indent=4, style=cyan)
+            for ln in wrap(out["suggested_text"], width() - 10):
+                print("    " + green("│ ") + ln)
         for e in out.get("edits", []):
             print()
-            say(f"Правка, строка {e['line']}" + (f": {e['reason']}" if e.get("reason") else ""), style=dim)
+            say(grey(f"Правка, строка {e['line']}" + (f": {e['reason']}" if e.get("reason") else "")), indent=4)
             if e["old_text"].strip():
-                say("было:  " + clip(e["old_text"], 400), indent=4, style=red)
-            say("стало: " + clip(e["new_text"], 600), indent=4, style=green)
+                hang(red("- "), clip(e["old_text"], 400), indent=4, style=red)
+            hang(green("+ "), clip(e["new_text"], 600), indent=4, style=green)
         for a in out.get("answers", []):
-            say(f"{a['question_id']}: {a['answer']}" + (f" ({a['basis']})" if a.get("basis") else ""), indent=4)
-        say(dim(out.get("model", "")), indent=2)
+            hang(gold(f"{a['question_id']}  "), a["answer"] + (grey(f"  ({a['basis']})") if a.get("basis") else ""), indent=4)
+        say(grey(italic(out.get("model", ""))), indent=4)
         return None
+
+
+def clip_ansi(s: str, n: int) -> str:
+    """Обрезать строку с цветами по видимой длине."""
+    if vlen(s) <= n:
+        return s
+    out, seen = [], 0
+    for tok in re.split(r"(\033\[[0-9;]*m)", s):
+        if ANSI.fullmatch(tok or "x"):
+            out.append(tok)
+            continue
+        if seen + len(tok) > n - 1:
+            out.append(tok[: max(0, n - 1 - seen)].rstrip(" ,;:."))
+            out.append("…")
+            break
+        out.append(tok)
+        seen += len(tok)
+    return "".join(out) + ("\033[0m" if _COLOR else "")
 
 
 # ---------- команды ----------
 
 
 def _help(sh: Shell, arg: str):
-    rows = [
-        ("путь к файлу", "проверить документ (можно перетащить файл в окно)"),
-        ("вопрос словами", "спросить помощника о результате (маскируется так же, как документ)"),
-        ("Н-03, В-2, ТР-05", "показать находку, вопрос заказчику или требование"),
-        ("/check путь [--fresh]", "проверить; --fresh: без кэша ответов"),
-        ("/dry путь", "сухая проверка: что ушло бы в модель, без запросов"),
-        ("/findings [крит|сущ|незн]", "список нарушений"),
-        ("/questions", "вопросы заказчику"),
-        ("/summary", "итог текущей проверки ещё раз"),
-        ("/report, /open", "путь к отчёту / открыть отчёт"),
-        ("/history, /load N", "прошлые проверки / открыть одну из них"),
-        ("/model [имя]", "показать или сменить модель"),
-        ("/standards [ieee830,ears,...]", "показать или выбрать стандарты"),
-        ("/clear, /exit", "очистить экран / выйти (или Ctrl+D)"),
+    groups = [
+        ("Проверка", [
+            ("путь к файлу", "проверить документ (файл можно перетащить в окно)"),
+            ("/check путь [--fresh]", "проверить; --fresh: без кэша ответов"),
+            ("/dry путь", "что ушло бы в модель после маскирования, без запросов"),
+        ]),
+        ("Результат", [
+            ("вопрос словами", "спросить помощника о результате"),
+            ("Н-03  В-2  ТР-05", "находка, вопрос заказчику, требование"),
+            ("/findings [крит|сущ|незн]", "список нарушений"),
+            ("/questions", "вопросы заказчику"),
+            ("/summary", "итог ещё раз"),
+            ("/report  /open", "путь к отчёту, открыть отчёт"),
+        ]),
+        ("Сессия", [
+            ("/history  /load N", "прошлые проверки, открыть одну из них"),
+            ("/model [имя]", "показать или сменить модель"),
+            ("/standards [ieee830,ears]", "показать или выбрать стандарты"),
+            ("/clear  /exit", "очистить экран, выйти (Ctrl+D)"),
+        ]),
     ]
-    w = max(len(a) for a, _ in rows)
+    w = max(len(a) for _, rows in groups for a, _ in rows)
+    for name, rows in groups:
+        print()
+        say(bold(name))
+        for a, b in rows:
+            cmd = re.sub(r"(/\w+)", lambda m: gold(m.group(1)), a)
+            print("    " + cmd + " " * (w - len(a) + 2) + grey(b))
     print()
-    for a, b in rows:
-        print(f"  {cyan(a.ljust(w))}  {b}")
-    say("Ctrl+C во время проверки останавливает её после текущего шага.", style=dim)
+    say(grey("Ctrl+C во время проверки останавливает её после текущего шага; готовые шаги сохраняются."))
 
 
 def _check(sh: Shell, arg: str):
@@ -398,20 +585,20 @@ def _check(sh: Shell, arg: str):
     fresh = "--fresh" in parts
     path = _as_path(" ".join(p for p in parts if p != "--fresh"))
     if not path:
-        return say("Укажите существующий файл: /check samples/requirements.pdf", style=yellow)
+        return say("Укажите существующий файл: /check samples/requirements.pdf", style=amber)
     return sh.check(str(path), fresh=fresh)
 
 
 def _dry(sh: Shell, arg: str):
     path = _as_path(arg)
     if not path:
-        return say("Укажите существующий файл: /dry samples/requirements_with_pii.md", style=yellow)
+        return say("Укажите существующий файл: /dry samples/requirements_with_pii.md", style=amber)
     return sh.check(str(path), dry=True)
 
 
 def _need(sh: Shell) -> bool:
     if not sh.res:
-        say("Сначала проверьте документ или откройте прошлую проверку (/history).", style=yellow)
+        say("Сначала проверьте документ или откройте прошлую проверку (/history).", style=amber)
         return False
     return True
 
@@ -424,28 +611,32 @@ def _findings(sh: Shell, arg: str):
     print()
     for f in sorted(fs, key=lambda f: ("critical", "major", "minor").index(f.severity)):
         sh._finding_line(f)
-    say(f"Всего: {len(fs)}. Подробно: введите ID, например {fs[0].fid if fs else 'Н-01'}.", style=dim)
+    print()
+    say(grey(f"Всего {len(fs)}. Подробно: введите ID, например ") + cyan(fs[0].fid if fs else "Н-01") + grey("."))
 
 
 def _questions(sh: Shell, arg: str):
     if not _need(sh):
         return
-    names = {"blocking": red("блок."), "important": yellow("важн."), "nice": dim("желат.")}
     print()
     for i, q in enumerate(sh.res.questions, 1):
-        print(f"  {bold(f'В-{i}'):<6} {names.get(q.priority, q.priority)}  " + clip(q.question, width() - 22))
-    say("Подробно и варианты ответа: введите ID, например В-1. Ответы заказчика: файл *_questions.md "
-        "и повторная проверка: python main.py --input ДОКУМЕНТ --output ОТЧЁТ --answers ФАЙЛ.", style=dim)
+        label, badge = PRIO.get(q.priority, ("?", B_MIN))
+        prefix = f"{badge(' ' + label + ' ')} {bold(f'В-{i}'):<5}  "
+        print("    " + prefix + clip(q.question, width() - 8 - vlen(prefix)))
+    print()
+    say(grey("Варианты ответа: введите ID, например ") + cyan("В-1") + grey(". Ответы заказчика впишите в файл *_questions.md "
+        "и повторите проверку с --answers."))
 
 
 def _summary(sh: Shell, arg: str):
     if _need(sh):
+        print()
         sh.summary()
 
 
 def _report(sh: Shell, arg: str):
     if _need(sh):
-        say(f"Отчёт: {sh.report_path}", style=cyan)
+        hang(grey("отчёт  "), cyan(str(sh.report_path)))
 
 
 def _open(sh: Shell, arg: str):
@@ -458,7 +649,7 @@ def _open(sh: Shell, arg: str):
         import subprocess
 
         subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", p])
-    say(f"Открываю {p}", style=dim)
+    say(grey(f"Открываю {p}"))
 
 
 def _history(sh: Shell, arg: str):
@@ -467,31 +658,37 @@ def _history(sh: Shell, arg: str):
     runs = services.list_runs()[:15]
     sh._runs = runs
     if not runs:
-        return say("Проверок пока нет.", style=dim)
+        return say(grey("Проверок пока нет."))
     print()
     for i, r in enumerate(runs, 1):
-        print(f"  {cyan(str(i).rjust(2))}  {r['id']}  {clip(r.get('title') or r.get('document', ''), width() - 30)}")
-    say("Открыть: /load N", style=dim)
+        d = r["id"]
+        when = f"{d[6:8]}.{d[4:6]} {d[9:11]}:{d[11:13]}" if len(d) >= 13 else d
+        print(f"    {gold(str(i).rjust(2))}  {grey(when)}  {clip(r.get('title') or r.get('document', ''), width() - 24)}")
+    print()
+    say(grey("Открыть: ") + gold("/load N"))
 
 
 def _load(sh: Shell, arg: str):
     from web import services
 
-    runs = getattr(sh, "_runs", None) or services.list_runs()[:15]
+    runs = sh._runs or services.list_runs()[:15]
     run_id = runs[int(arg) - 1]["id"] if arg.isdigit() and 0 < int(arg) <= len(runs) else arg
     if not run_id:
-        return say("Укажите номер из /history.", style=yellow)
+        return say("Укажите номер из /history.", style=amber)
     res = services.load_run(run_id)
     files = services.run_files(res)
     sh.open_result(res, files.get("report"))
-    say(f"Открыта проверка {run_id}: {res.doc.title}", style=green)
+    print()
+    hang(green("● "), f"Открыта проверка {grey(run_id)}: {res.doc.title}")
+    print()
     sh.summary()
 
 
 def _model(sh: Shell, arg: str):
     if arg:
         sh.cfg.model = arg
-    say(f"Модель: {sh.cfg.provider} {sh.cfg.model}; запасные: {', '.join(sh.cfg.fallbacks) or 'нет'}")
+    hang(grey("модель    "), cyan(sh.cfg.model))
+    hang(grey("запасные  "), ", ".join(sh.cfg.fallbacks) or "нет", style=grey)
 
 
 def _standards(sh: Shell, arg: str):
@@ -501,8 +698,8 @@ def _standards(sh: Shell, arg: str):
         ids = [s.strip() for s in arg.split(",") if s.strip()]
         profile(ids)  # неизвестный стандарт: ошибка до проверки
         sh.cfg.standards = ids
-    say(f"Стандарты: {profile(sh.cfg.standards).titles()}")
-    say("Доступны: " + ", ".join(sorted(available())), style=dim)
+    hang(grey("стандарты  "), profile(sh.cfg.standards).titles())
+    hang(grey("доступны   "), ", ".join(sorted(available())), style=grey)
 
 
 def _clear(sh: Shell, arg: str):
@@ -530,11 +727,6 @@ def _as_path(s: str) -> Path | None:
         return None
     p = Path(os.path.expanduser(s))
     return p if p.is_file() else None
-
-
-def _first_sentence(s: str) -> str:
-    m = re.match(r"(.+?[.!?])(\s|$)", (s or "").strip())
-    return m.group(1) if m and len(m.group(1)) > 25 else (s or "")
 
 
 def run() -> int:
