@@ -271,11 +271,12 @@ class Shell:
         self.history: list[dict] = []  # диалог с помощником по текущей проверке
         self.stop = threading.Event()
         self._runs: list[dict] = []
+        self.fmt: str | None = None  # формат отчёта: pdf, md или both; спрашивается при первой проверке
 
     # --- вход ---
 
     def banner(self) -> None:
-        from . import __version__
+        from . import APP_NAME, __version__
         from .criteria import profile
 
         from .config import PROVIDERS
@@ -283,7 +284,7 @@ class Shell:
         key = green("найден") if self.cfg.api_key else amber(f"нет: введите /key ({PROVIDERS[self.cfg.provider]['key']})")
         fb = f" {grey(f'(запасных: {len(self.cfg.fallbacks)})')}" if self.cfg.fallbacks else ""
         rows = [
-            green("▌") + " " + bold("Агент проверки требований") + grey("  статическое ревью документа до разработки"),
+            green("▌") + " " + bold(APP_NAME) + grey("  агент проверки требований") + grey(", статическое ревью документа до разработки"),
             "",
             f"  {grey('модель    ')}{self.cfg.provider} {cyan(self.cfg.model)}{fb}",
             f"  {grey('ключ      ')}{key}",
@@ -310,7 +311,9 @@ class Shell:
             crit = sum(f.severity == "critical" for f in op)
             doc = f"{clip(self.res.doc.path.name, 32)}: {len(op)} нарушений, {crit} крит."
         room = width() - 12 - len(doc) - len(model)
-        return f"{short_path(Path.cwd(), max(16, room))} / {doc} / {model}"
+        fmt = FORMAT_NAMES.get(self.fmt or "pdf", "PDF")
+        room -= len(fmt) + 10
+        return f"{short_path(Path.cwd(), max(16, room))} / {doc} / {model} / отчёт {fmt}"
 
     def loop(self) -> int:
         self.banner()
@@ -379,6 +382,8 @@ class Shell:
         if not cfg.api_key and not dry:
             say("Нет ключа модели: впишите GEMINI_API_KEY в .env (см. README). Без ключа доступно /dry.", style=red)
             return None
+        if self.fmt is None and not dry:
+            self.fmt = "pdf" if getattr(self, "strip", False) else ask_format()
         events: queue.Queue = queue.Queue()
         self.stop.clear()
         box: dict = {}
@@ -444,14 +449,13 @@ class Shell:
         res = box["res"]
         if dry:
             return None  # конвейер сам написал, где лежит маскированный документ
-        out = Path("reports") / f"{Path(path).stem}_report.md"
-        report.write(res, out)
-        extras = report.write_extras(res, out)
-        self.open_result(res, out)
+        paths = [report.write(res, p) for p in report.report_paths(Path("reports") / f"{Path(path).stem}_report", self.fmt)]
+        extras = report.write_extras(res, paths[0])
+        self.open_result(res, paths[0])
         print()
         self.summary(seconds=int(time.time() - t_all))
         print()
-        hang(grey("отчёт      "), cyan(str(out)))
+        hang(grey("отчёт      "), cyan(", ".join(map(str, paths))))
         if extras:
             hang(grey("вопросы    "), cyan(str(next(iter(extras.values())))))
         print()
@@ -890,6 +894,33 @@ def _clear(sh: Shell, arg: str):
     sh.banner()
 
 
+FORMAT_NAMES = {"pdf": "PDF", "md": "Markdown", "both": "PDF и Markdown"}
+
+
+def ask_format() -> str:
+    """Спросить формат отчёта один раз: Enter оставляет PDF."""
+    say("Формат отчёта: " + gold("1") + " PDF (по умолчанию)  " + gold("2") + " Markdown  " + gold("3") + " оба")
+    try:
+        a = input("  выбор [1]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        a = ""
+    fmt = {"2": "md", "md": "md", "3": "both", "both": "both", "оба": "both"}.get(a, "pdf")
+    say(grey(f"Отчёты: {FORMAT_NAMES[fmt]}. Сменить: /format pdf, /format md или /format both."))
+    return fmt
+
+
+def _format(sh: Shell, arg: str):
+    a = arg.strip().lower()
+    if a in FORMAT_NAMES:
+        sh.fmt = a
+    elif a:
+        return say("Варианты: /format pdf, /format md, /format both", style=amber)
+    elif sh.fmt is None:
+        sh.fmt = ask_format()
+        return None
+    say(grey("формат отчёта  ") + FORMAT_NAMES.get(sh.fmt or "pdf", "PDF"))
+
+
 def _exit(sh: Shell, arg: str):
     return "exit"
 
@@ -897,7 +928,7 @@ def _exit(sh: Shell, arg: str):
 COMMANDS = {"help": _help, "?": _help, "check": _check, "dry": _dry, "findings": _findings, "f": _findings,
             "questions": _questions, "q": _questions, "summary": _summary, "report": _report, "open": _open,
             "history": _history, "load": _load, "model": _model, "standards": _standards, "clear": _clear,
-            "provider": _provider, "key": _key, "baseurl": _baseurl, "models": _models,
+            "provider": _provider, "key": _key, "baseurl": _baseurl, "models": _models, "format": _format,
             "exit": _exit, "quit": _exit}
 
 
@@ -910,7 +941,7 @@ CMD_HELP = {
     "history": "прошлые проверки", "load": "открыть прошлую проверку", "model": "выбрать модель из списка",
     "standards": "выбрать стандарты", "provider": "gemini, anthropic (Claude), openai и совместимые",
     "key": "ввести ключ скрыто (в модель не уходит)", "models": "список моделей с вашего ключа или сервера", "baseurl": "свой сервер: Ollama, vLLM, OpenRouter",
-    "clear": "очистить экран", "help": "все команды", "exit": "выход",
+    "format": "формат отчёта: pdf, md или both", "clear": "очистить экран", "help": "все команды", "exit": "выход",
 }
 EXAMPLES = [
     "почему нельзя начинать разработку?",
@@ -1072,12 +1103,35 @@ def _make_reader(sh: "Shell", pt_input=None, pt_output=None):
 
         history = InMemoryHistory()
 
-    def toolbar():
-        return HTML("  <key>Tab</key> подсказки  <key>→</key> принять серую подсказку  <key>↑↓</key> история  "
-                    "<key>/help</key> команды  <key>Ctrl+D</key> выход")
+    from html import escape
 
+    from prompt_toolkit.key_binding import KeyBindings
+
+    kb = KeyBindings()
+
+    @kb.add("f2")
+    def _next_format(event):
+        """F2: формат отчёта по кругу PDF, Markdown, оба."""
+        sh.fmt = {"pdf": "md", "md": "both", "both": "pdf"}[sh.fmt or "pdf"]
+        event.app.invalidate()
+
+    @kb.add("f3")
+    def _next_model(event):
+        """F3: следующая модель провайдера на эту сессию (сохранить в .env: /model)."""
+        items = [m for m, _ in _models_for(sh)]
+        if items:
+            i = (items.index(sh.cfg.model) + 1) % len(items) if sh.cfg.model in items else 0
+            sh.cfg.model = items[i]
+        event.app.invalidate()
+
+    def toolbar():
+        fmt = FORMAT_NAMES.get(sh.fmt or "pdf", "PDF")
+        return HTML(f"  <key>F2</key> отчёт: <b>{escape(fmt)}</b>   <key>F3</key> модель: <b>{escape(sh.cfg.model)}</b>   "
+                    "<key>Tab</key> подсказки  <key>↑↓</key> история  <key>/help</key> команды  <key>Ctrl+D</key> выход")
+
+    sh.strip = True  # формат и модель видны и меняются в строке внизу: отдельно спрашивать не нужно
     session = PromptSession(history=history, completer=ShellCompleter(), auto_suggest=ShellSuggest(),
-                            complete_while_typing=True, style=style, bottom_toolbar=toolbar,
+                            complete_while_typing=True, style=style, bottom_toolbar=toolbar, key_bindings=kb,
                             reserve_space_for_menu=6, input=pt_input, output=pt_output)
     read = lambda: session.prompt([("class:prompt", "  › ")])  # noqa: E731
     read.session = session  # для тестов: доступ к подсказкам

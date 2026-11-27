@@ -314,14 +314,17 @@ def load_run(run_id: str):
     return pipeline.load_state(run_dir(run_id))
 
 
-def run_files(res) -> dict[str, Path]:
-    """Отчёт и сопутствующие файлы на диске (runs/web_reports/<проверка>/), создаются при первом обращении."""
+def run_files(res, pdf: bool = False) -> dict[str, Path]:
+    """Отчёт и сопутствующие файлы на диске (runs/web_reports/<проверка>/).
+
+    Markdown пишется заново при каждом обращении (дёшево и всегда в текущем оформлении), PDF только по запросу.
+    """
     d = WEB_REPORTS / res.audit_dir.name
-    rp = d / f"{res.doc.path.stem}_report.md"
-    if not rp.exists():
-        report.write(res, rp)
+    rp = report.write(res, d / f"{res.doc.path.stem}_report.md")
     files = {"report": rp}
-    extras = report.write_extras(res, rp)
+    if pdf:
+        files["report_pdf"] = report.write(res, rp.with_suffix(".pdf"))
+    extras = report.write_extras(res, rp, questions=True)
     for key, label in (("questions", "Вопросы"), ("fixed", "Исправленная")):
         p = next((v for k, v in extras.items() if k.startswith(label)), None)
         if p:

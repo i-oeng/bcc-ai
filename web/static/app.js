@@ -380,7 +380,7 @@ async function showResult(runId) {
   $("#res-title").textContent = r.document.title || docName(r.document.name);
   $("#tab-result").hidden = false;
   $("#res-meta").textContent = `${docName(r.document.name)} / ${new Date(r.started).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" })}`;
-  const files = [["report", "отчёт"], ["questions", "вопросы"], ...(r.has_fixed ? [["fixed", "исправленная редакция"]] : []), ["result", "JSON"]];
+  const files = [["report_pdf", "отчёт PDF"], ["report", "отчёт MD"], ["questions", "вопросы"], ...(r.has_fixed ? [["fixed", "исправленная редакция"]] : []), ["result", "JSON"]];
   $("#res-files").innerHTML = `<a href="/api/runs/${encodeURIComponent(r.id)}/report" target="_blank" rel="noopener">Полный отчёт</a> / Скачать: `
     + files.map(([k, l]) => `<a href="${api.fileUrl(r.id, k)}">${esc(l)}</a>`).join(" / ");
   renderVerdict(r); renderSevFilter(r); renderFindings(r); renderQuestions(r); renderMore(r);

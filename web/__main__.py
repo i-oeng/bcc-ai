@@ -6,7 +6,7 @@ import uvicorn
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(prog="python -m web", description="Веб-интерфейс агента проверки требований")
+    ap = argparse.ArgumentParser(prog="python -m web", description="Веб-интерфейс oresa, агента проверки требований")
     ap.add_argument("--host", default="127.0.0.1", help="по умолчанию только этот компьютер")
     ap.add_argument("--port", type=int, default=8000)
     a = ap.parse_args()

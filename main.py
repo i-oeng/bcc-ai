@@ -1,4 +1,4 @@
-"""Агент проверки требований: запуск одной командой.
+"""Запуск агента Oresa из командной строки.
 
     python main.py --input samples/requirements.pdf --output reports/report.md
 

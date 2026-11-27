@@ -1,4 +1,4 @@
-"""Отчёт о проверке в формате Markdown (на русском)."""
+"""Отчёт о проверке на русском: Markdown, из него PDF (validator/pdf.py)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 from .config import PROVIDERS
-from .criteria import SEVERITIES, SEVERITY_RULES, Criterion
+from .criteria import SEVERITIES
 from .grounding import Anchor
 from .pipeline import RunResult
 from .schemas import Finding
@@ -84,6 +84,9 @@ class Renderer:
         return ", ".join(ids) or "документ целиком"
 
     # ---- разделы ----
+    # Набор разделов фиксирован и выводится всегда, даже пустой: рамка решения, 1-6 и приложение А
+    # (приложение Б только с --fix). Внутри разделов текст, цифры и таблицы не обрезаются.
+    # Всё, что написала модель, к этому моменту прошло проверку опоры (strict.py).
 
     def render(self) -> str:
         parts = [
@@ -94,18 +97,14 @@ class Renderer:
             self.questions(),
             self.set_level(),
             self.per_requirement(),
-            self.checklist(),
             self.segmentation(),
-            self.appendix(),
+            self.fixed_doc(),
         ]
         return "\n\n".join(p.strip("\n") for p in parts if p) + "\n"
 
     def header(self) -> str:
         r = self.res
-        open_ = r.open_findings()
-        sev = Counter(f.severity for f in open_)
-        closed = len(r.kept()) - len(open_)
-        blocking = sum(1 for q in r.questions if q.priority == "blocking")
+        closed = len(r.kept()) - len(r.open_findings())
         out = [
             "# Отчёт о проверке требований",
             "",
@@ -113,61 +112,77 @@ class Renderer:
             "",
             f"> **Разработка:** {r.decision_dev}.  ",
             f"> **Тестирование:** {r.decision_test}.",
-            "",
-            "| Требований | Нарушений | Критичных | Существенных | Незначительных | Вопросов заказчику |",
-            "| :---: | :---: | :---: | :---: | :---: | :---: |",
-            f"| {len(r.requirements)} | {len(open_)} | {sev['critical']} | {sev['major']} | {sev['minor']} | "
-            f"{len(r.questions)} (блокирующих {blocking}) |",
         ]
         if closed:
             out += ["", f"Ещё {closed} нарушений закрыто ответами заказчика."]
-        out += ["", "Отчёт сформирован агентом автоматически. Каждое нарушение ссылается на страницу и строку документа "
-                "и приводит дословную цитату."]
         return "\n".join(out)
 
     def passport(self) -> str:
         r = self.res
         u = r.usage
         provider = getattr(r.config, "provider", "gemini")
-        model = f"{PROVIDERS.get(provider, {}).get('title', provider)} `{r.config.model}`"
+        model = f"{PROVIDERS.get(provider, {}).get('title', provider)} {r.config.model}"
         if u and u.steps:
             used = Counter(m for _, m in u.steps)
             if set(used) != {r.config.model}:
-                model += "; ответили: " + ", ".join(f"`{m}` ({n} шаг.)" for m, n in used.most_common())
-        dur = ""
-        if r.finished:
-            secs = int((r.finished - r.started).total_seconds())
-            dur = f"{secs // 60} мин {secs % 60} с"
+                model += "; ответили: " + ", ".join(f"{m} ({n} шаг.)" for m, n in used.most_common())
         rows = [
-            ("Документ", f"{self.cell(r.doc.title, model=False)} (`{r.doc.path.name}`, {len(r.doc.lines)} строк, "
-                         f"SHA-256 `{r.doc.sha256[:12]}`)"),
-            ("Дата", r.started.strftime("%d.%m.%Y %H:%M") + f" ({r.config.tz.key})"),
+            ("Документ", f"{self.cell(r.doc.title, model=False)} ({r.doc.path.name}, {len(r.doc.lines)} строк, "
+                         f"SHA-256 {r.doc.sha256[:12]})"),
+            ("Дата", r.started.strftime("%d.%m.%Y %H:%M") + f" ({_tz_ru(r.started, r.config.tz.key)})"),
             ("Модель", model),
-            ("Версия агента", r.agent_version),
+            ("Версия агента", f"oresa {_version_ru(r.agent_version)}"),
             ("Стандарты", self.P.cites()),
         ]
-        if dur:
-            req = f"; запросов к модели: {u.calls}" if u else ""
-            rows.append(("Длительность", dur + req))
+        if r.finished:
+            secs = int((r.finished - r.started).total_seconds())
+            rows.append(("Длительность", f"{secs // 60} мин {secs % 60} с" + (f", запросов к модели: {u.calls}" if u else "")))
+        red = r.redactor.stats() if r.redactor else {}
+        if not r.config.redact:
+            rows.append(("Маскирование", "отключено"))
+        elif red:
+            rows.append(("Маскирование", "до отправки в модель заменено: "
+                         + ", ".join(f"{MASK_RU.get(k, k)}: {v}" for k, v in red.items())))
+        else:
+            rows.append(("Маскирование", "включено, чувствительных данных не найдено"))
+        rows.append(("Опора на документ", self._grounding()))
         for w in getattr(r, "warnings", []) or []:
-            rows.append(("Предупреждение", self.cell(w, 300)))
+            rows.append(("Предупреждение", self.cell(w)))
         body = "\n".join(f"| {k} | {v} |" for k, v in rows)
-        return f"## Паспорт прогона\n\n| | |\n| :--- | :--- |\n{body}"
+        return f"## 1. Паспорт прогона\n\n| Параметр | Значение |\n| :--- | :--- |\n{body}"
+
+    def _grounding(self) -> str:
+        r = self.res
+        g = getattr(r, "grounding", None) or {}
+        parts = [f"находки без цитаты из документа: {len(r.ungrounded)}",
+                 f"требования, цитата которых не найдена: {len(r.lost_requirements)}"]
+        removed = [("ссылки на несуществующие нарушения, требования или вопросы", g.get("ids", 0)),
+                   ("ссылки на строки вне документа", g.get("lines", 0)),
+                   ("вопросы без связи с документом", g.get("questions", 0)),
+                   ("цитаты в вопросах, которых нет в документе", g.get("quotes", 0)),
+                   ("пункты итога без нарушений", g.get("fix_first", 0)),
+                   ("формулировки сверки, заменённые цитатой документа", g.get("acceptance", 0))]
+        parts += [f"{k}: {v}" for k, v in removed if v]
+        return ("каждое нарушение, требование и вопрос в отчёте опирается на цитату, найденную в документе "
+                "(совпадение не ниже 85%), номера строк и ссылки сверены кодом. Исключено при проверке: "
+                + "; ".join(parts) + ".")
 
     def verdict(self) -> str:
         r = self.res
         c = r.conclusion
-        out = ['<a id="итог"></a>', "## Итог", ""]
-        if c:  # само решение уже в рамке вверху отчёта: здесь только обоснование
+        out = ["## 2. Итог", ""]
+        if c:  # само решение в рамке вверху отчёта, здесь обоснование модели
             out += [f"**Разработка.** {self.t(c.development_rationale)}", "",
                     f"**Тестирование.** {self.t(c.testing_rationale)}"]
         else:
             out += [f"Разработка: {r.decision_dev}. Тестирование: {r.decision_test}."]
+        out += ["", "**Что исправить в первую очередь**", ""]
         if c and c.fix_first:
-            out += ["", "### Что исправить в первую очередь", ""]
             for i, it in enumerate(c.fix_first, 1):
-                ids = ", ".join(self.fid_link(x) for x in it.finding_ids if x in self.by_id)
+                ids = ", ".join(x for x in it.finding_ids if x in self.by_id)
                 out.append(f"{i}. **{self.t(it.title).rstrip('.')}.** {self.t(it.action)}" + (f" ({ids})" if ids else ""))
+        else:
+            out.append("Открытых нарушений нет.")
         if c and c.overall:
             out += ["", self.t(c.overall)]
         return "\n".join(out)
@@ -175,11 +190,21 @@ class Renderer:
     def summary(self) -> str:
         r = self.res
         kept = r.open_findings()
+        sev = Counter(f.severity for f in kept)
         crit = [f for f in kept if f.severity == "critical"]
         affected = len({x for f in kept if f.scope == "requirement" for x in f.req_ids})
-        out = ['<a id="сводка"></a>', "## Сводка", "",
-               f"Требований: **{len(r.requirements)}**, с нарушениями: **{affected}**. Открытых нарушений: **{len(kept)}**. "
-               f"Ниже критичные дефекты; полный список в разделах проверки набора и каждого требования."]
+        blocking = sum(1 for q in r.questions if q.priority == "blocking")
+        out = ["## 3. Сводка", "",
+               "| Показатель | Значение |", "| :--- | :--- |",
+               f"| Требований | {len(r.requirements)} |",
+               f"| Требований с нарушениями | {affected} |",
+               f"| Открытых нарушений | {len(kept)} |",
+               f"| из них критичных | {sev['critical']} |",
+               f"| из них существенных | {sev['major']} |",
+               f"| из них незначительных | {sev['minor']} |",
+               f"| Вопросов заказчику | {len(r.questions)} (блокирующих {blocking}) |", ""]
+        out += self._metrics()
+        out.append("**Критичные дефекты**")
         if not crit:
             return "\n".join(out + ["", "Критичных дефектов не найдено."])
         groups = [("Противоречивые", ("set_consistent", "correct")), ("Непроверяемые", ("verifiable",)),
@@ -189,221 +214,318 @@ class Renderer:
             fs = [f for f in crit if f.fid not in used and (codes is None or f.criterion in codes)]
             if not fs:
                 continue
-            out += ["", f"### {title}", ""]
+            out += ["", f"*{title}*", ""]
             for f in fs:
                 used.add(f.fid)
-                nums = sorted({a.line for a in f.anchors})[:4]
-                lines = ("строка " if len(nums) == 1 else "строки ") + ", ".join(map(str, nums))
-                ids = ", ".join(dict.fromkeys(self.cell(self.res.req(x).doc_id) for x in f.req_ids if self.res.req(x)))
-                q = self.qnum.get(f.fid)
-                ask = f" Вопрос [В-{q}](#в-{q})." if q else ""
-                out.append(f"* **{self.fid_link(f.fid)}** {ids or 'документ'} / {lines}. "
-                           f"{self.cell(_first_sentence(f.problem), 240)}{ask}")
+                out.append(f"* **{f.fid}** ({self._place(f)}). {self.cell(f.problem)}")
         return "\n".join(out)
+
+    # ---- показатели и графики (считает код по подтверждённым данным, модель цифр не пишет) ----
+
+    def _marks(self) -> dict[str, list[str]]:
+        r = self.res
+        return {q.rid: [r.req_verdicts.get(q.rid, {}).get(c.code, ("unreviewed", ""))[0] for c in self.P.requirement]
+                for q in r.requirements}
+
+    def _index(self, verdicts: list[str]) -> int | None:
+        """Индекс качества требования: доля пройденных применимых критериев, в процентах."""
+        ok, bad = verdicts.count("ok"), verdicts.count("violation")
+        return round(100 * ok / (ok + bad)) if ok + bad else None
+
+    def _metrics(self) -> list[str]:
+        r = self.res
+        kept = r.open_findings()
+        marks = self._marks()
+        ok = sum(v.count("ok") for v in marks.values())
+        bad = sum(v.count("violation") for v in marks.values())
+        out = ["**Показатели качества**", ""]
+        if ok + bad:
+            clean = sum(1 for v in marks.values() if "violation" not in v)
+            out += [f"Индекс качества документа: **{round(100 * ok / (ok + bad))}%** (доля пройденных проверок "
+                    f"«требование и критерий», {ok} из {ok + bad}). Требований без нарушений: {clean} из {len(marks)}.", ""]
+        if len(kept) >= 3:
+            sev = Counter(f.severity for f in kept)
+            out += _chart("Нарушения по серьёзности", "Серьёзность",
+                          [(SEVERITIES[s].lower(), sev[s]) for s in ("critical", "major", "minor")])
+            by_crit = Counter(self.P.name(f.criterion) for f in kept)
+            if len(by_crit) >= 2:
+                out += _chart("Нарушения по критериям качества", "Критерий", by_crit.most_common())
+            by_sec = Counter()
+            for f in kept:
+                rq = next((r.req(x) for x in f.req_ids if r.req(x)), None)
+                sec = (rq.section if rq else "") or (f.anchors[0].section if f.anchors else "") or "документ целиком"
+                by_sec[sec.split(" > ")[0].split(" / ")[0].strip() or "документ целиком"] += 1
+            if len(by_sec) >= 2:
+                out += _chart("Нарушения по разделам документа", "Раздел", by_sec.most_common())
+        cov = {c.req_id: c for c in r.coverage}
+        func = [q for q in r.requirements if q.kind == "functional" and q.rid in cov]
+        if func:
+            covered = sum(1 for q in func if cov[q.rid].acceptance_ids)
+            full = sum(1 for q in func if cov[q.rid].acceptance_ids and not cov[q.rid].missing_scenarios)
+            out += _chart("Покрытие функциональных требований критериями приёмки", "Покрытие",
+                          [("покрыты полностью", full), ("покрыты частично", covered - full),
+                           ("не покрыты", len(func) - covered)])
+        return out
 
     def questions(self) -> str:
         r = self.res
-        if not r.questions and not r.answers:
-            return ""
-        out = ["## Вопросы для уточнения", "",
-               "Без ответов на блокирующие вопросы начинать разработку нельзя. Файл с полями для ответов лежит рядом "
-               "с отчётом (`*_questions.md`); после ответов повторите проверку с `--answers`."]
+        out = ["## 4. Вопросы к заказчику", ""]
+        if not r.questions:
+            out.append("Вопросов нет: документ не оставляет открытых решений для заказчика.")
+        else:
+            out.append("Блокирующие вопросы нужно закрыть до начала разработки. Чтобы агент учёл ответы, "
+                       "запустите проверку с ключом `--questions-file`, впишите ответы в созданную форму "
+                       "и повторите проверку с ключом `--answers`.")
         n = 0
         for pr in ("blocking", "important", "nice"):
             qs = [q for q in r.questions if q.priority == pr]
             if not qs:
                 continue
-            out += ["", f"### {PRIORITY[pr]}", ""]
+            out += ["", f"**{PRIORITY[pr]}**", ""]
             for q in qs:
                 n += 1
-                links = ", ".join(self.fid_link(x) for x in q.finding_ids if x in self.by_id)
-                meta = " / ".join(x for x in (self.cell(q.addressee), links) if x)
-                out.append(f'<a id="в-{n}"></a>**В-{n}.** {self.t(q.question)}' + (f" *({meta})*" if meta else "") + "  ")
+                parts = [f"{n}. **В-{n}.** {self.t(q.question)}"]
+                if q.why:
+                    parts.append(f"Почему важно: {self.t(q.why).rstrip('.')}.")
                 if q.options:
-                    out.append("Варианты: " + "; ".join(f"({i}) {self.cell(o).rstrip('. ')}"
-                                                        for i, o in enumerate(q.options, 1)) + ".")
-                out.append("")
+                    parts.append("Варианты: " + "; ".join(f"({i}) {self.cell(o).rstrip('. ')}"
+                                                         for i, o in enumerate(q.options, 1)) + ".")
+                src = self._quote_place(q.quote)
+                links = ", ".join(x for x in q.finding_ids if x in self.by_id)
+                meta = "; ".join(x for x in (f"кому: {self.cell(q.addressee).rstrip('.')}" if q.addressee else "",
+                                             f"нарушения: {links}" if links else "", src) if x)
+                if meta:
+                    parts.append(f"*({meta})*")
+                out.append(" ".join(parts))
         if r.answers:
-            out += ["### Учтённые ответы заказчика", ""]
+            out += ["", "**Учтённые ответы заказчика**", ""]
             for qa in r.answers:
                 closed = [f for f in r.kept() if f.resolution and qa.qid in f.resolution_note]
-                eff = ", ".join(f"{self.fid_link(f.fid)} {'закрыта' if f.resolution == 'closed' else 'уточнена'}" for f in closed)
-                out.append(f"* **{qa.qid}.** {self.cell(qa.question, 200)} Ответ: {self.cell(qa.answer, 300, model=False)}. "
+                eff = ", ".join(f"{f.fid} {'закрыта' if f.resolution == 'closed' else 'уточнена'}" for f in closed)
+                out.append(f"* **{qa.qid}.** {self.cell(qa.question)} Ответ: {self.cell(qa.answer, model=False)}. "
                            + (f"Влияние: {eff}." if eff else "Дефекты не закрыты."))
         return "\n".join(out)
 
-    def _finding(self, f: Finding, show_reqs: bool = True) -> str:
-        crit = self.P.by_code.get(f.criterion) or Criterion(f.criterion, self.P.name(f.criterion), "", "")
-        head = f'<a id="{f.fid.lower()}"></a>**{f.fid}** / {SEVERITIES[f.severity]} / {crit.name}'
-        if show_reqs:
-            head += f" / {self.reqs(f)}"
-        out = []
+    def _quote_place(self, quote: str) -> str:
+        """Основание вопроса: дословная цитата документа и её строка."""
+        if not quote:
+            return ""
+        if not hasattr(self, "_g"):
+            from .strict import _grounder
+
+            self._g = _grounder(self.res)
+        a = self._g.find(quote, min_score=85)
+        return f"основание: «{self.cell(_plain(a.text), model=False)}», {_where(a)}" if a else ""
+
+    # ---- таблица нарушений ----
+
+    def _place(self, f: Finding) -> str:
+        """Где: ID требований в документе и строки."""
+        ids = list(dict.fromkeys(self.cell(self.res.req(x).doc_id) for x in f.req_ids if self.res.req(x)))
+        lines = sorted({a.line for a in f.anchors})
+        pages = sorted({a.page for a in f.anchors if a.page})
+        loc = ""
+        if lines:
+            loc = ("строка " if len(lines) == 1 else "строки ") + ", ".join(map(str, lines))
+            if pages:
+                loc = ("с. " + ", ".join(map(str, pages)) + ", ") + loc
+        return ", ".join(x for x in (", ".join(ids) or "документ целиком", loc) if x)
+
+    def _row(self, fs: list[Finding]) -> str:
+        f = fs[0]
+        sev = {"critical": "**КРИТИЧНО**", "major": "**существенно**"}.get(f.severity, "незначительно")
+        num = ", ".join(x.fid for x in fs)
+        if len(fs) == 1:
+            where = self._place(f)
+        else:  # одинаковые мелкие замечания в разных местах: одна строка, все места перечислены
+            lines = sorted({a.line for x in fs for a in x.anchors})
+            where = ", ".join(dict.fromkeys(self.cell(self.res.req(r).doc_id) for x in fs for r in x.req_ids
+                                            if self.res.req(r)))
+            where = (where + ", " if where else "") + "строки " + ", ".join(map(str, lines))
+        problem = self.cell(f.problem)
+        if len(fs) > 1:
+            problem += f" То же ещё в {len(fs) - 1} местах."
         if f.resolution == "closed":
-            out.append(f"*Закрыто ответом заказчика: {self.t(f.resolution_note)}*  ")
+            problem = f"*Закрыто ответом заказчика: {self.cell(f.resolution_note)}* " + problem
         elif f.resolution == "changed":
-            out.append(f"*Уточнено ответом заказчика: {self.t(f.resolution_note)}*  ")
-        out += [head + "  ", self.t(f.problem), ""]
-        out += [f"> {self.quote(a)}  " for a in f.anchors]
-        out += ["", f"**Исправить:** {self.t(f.fix)}"]
-        return "\n".join(out)
+            problem = f"*Уточнено ответом заказчика: {self.cell(f.resolution_note)}* " + problem
+        anchors = [a for x in fs for a in x.anchors]
+        seen: set[str] = set()
+        for a in anchors:  # каждая цитата один раз, со строкой
+            if a.text in seen:
+                continue
+            seen.add(a.text)
+            problem += f"<br>*«{self.cell(_plain(a.text), model=False)}» ({_where(a)})*"
+        crit = self.P.by_code.get(f.criterion)
+        crit_name = crit.name if crit else self.P.name(f.criterion)
+        return f"| **{num}**<br>{sev} | {where} | {self.cell(crit_name)} | {problem} | {self.cell(f.fix)} |"
+
+    def _table(self, fs: list[Finding]) -> list[str]:
+        rank = {"critical": 0, "major": 1, "minor": 2}
+        fs = sorted(fs, key=lambda f: (rank[f.severity], f.fid))
+        groups: list[list[Finding]] = []
+        index: dict[tuple, list[Finding]] = {}
+        for f in fs:
+            if f.severity == "minor" and not f.resolution:
+                key = (f.criterion, re.sub(r"\d+", "#", f.problem.strip()), re.sub(r"\d+", "#", f.fix.strip()))
+                if key in index:
+                    index[key].append(f)
+                    continue
+                index[key] = [f]
+                groups.append(index[key])
+            else:
+                groups.append([f])
+        return ["| № | Где | Критерий | Нарушение и цитата | Как исправить |", "| :--- | :--- | :--- | :--- | :--- |",
+                *(self._row(g) for g in groups)]
+
+    # ---- проверка набора и каждого требования ----
 
     def set_level(self) -> str:
         r = self.res
-        out = ["## Проверка всего набора требований", "", "| Критерий | Оценка | Комментарий |", "| :--- | :--- | :--- |"]
+        out = ["## 5. Проверка всего набора требований", "", "| Критерий | Оценка | Комментарий |", "| :--- | :--- | :--- |"]
         for c in self.P.set:
             v, comment = r.set_verdicts.get(c.code, ("unreviewed", ""))
-            ids = [self.fid_link(f.fid) for f in r.open_findings() if f.criterion == c.code]
-            note = self.cell(comment, 220)
+            ids = [f.fid for f in r.open_findings() if f.criterion == c.code]
+            note = self.cell(comment) if comment else ""
             if ids:
-                note += (" " if note else "") + "Находки: " + ", ".join(ids) + "."
+                note += (" " if note else "") + "Нарушения: " + ", ".join(ids) + "."
             mark = SET_MARK.get(v, v)
             out.append(f"| {c.name} | {'**' + mark + '**' if v == 'violation' else mark} | {note} |")
         checks = getattr(r, "acceptance_checks", [])
-        if checks:
-            out += ["", "### Сверка примеров приёмки с правилами", "",
-                    "| Пример | Правило | Результат | По правилу | В примере |", "| :--- | :--- | :--- | :--- | :--- |"]
+        out += ["", "### Сверка критериев приёмки с правилами", ""]
+        if not checks:
+            out.append("Критериев приёмки, которые можно сверить с правилами, в документе нет.")
+        else:
+            bad = [c for c in checks if c.status != "agrees"]
+            out += [f"Согласуются {len(checks) - len(bad)} из {len(checks)}.", "",
+                    "| Критерий приёмки | Правило | Результат | По правилу | В примере |",
+                    "| :--- | :--- | :--- | :--- | :--- |"]
             for c in checks:
                 example, rule = r.req(c.acceptance_id), r.req(c.req_id)
-                a = f"{self.cell(example.doc_id)}, строка {example.anchor.line}"
+                a = f"{self.cell(example.doc_id)}, строка {example.anchor.line}" if example else c.acceptance_id
                 b = f"{self.cell(rule.doc_id)}, строка {rule.anchor.line}" if rule else "не найдено"
                 res_ = ACCEPTANCE_MARK[c.status]
                 out.append(f"| {a} | {b} | {'**' + res_ + '**' if c.status == 'conflict' else res_} | "
-                           f"{self.cell(c.expected, 160)} | {self.cell(c.stated, 160)} |")
-        if r.coverage or checks:
-            coverage = {c.req_id: c for c in r.coverage}
-            statuses = {(c.req_id, c.acceptance_id): c.status for c in checks}
-            out += ["", "### Покрытие функциональных требований критериями приёмки", "",
-                    "| Требование | Проверяется примерами | Не покрыто |", "| :--- | :--- | :--- |"]
-            for q in (q for q in r.requirements if q.kind == "functional"):
-                c = coverage.get(q.rid)
-                linked = list(dict.fromkeys([*(c.acceptance_ids if c else []),
-                                             *(aid for rid, aid in statuses if rid == q.rid)]))
-                if not c and not linked:
-                    continue  # описания архитектуры и схем: сценариев приёмки у них нет
-                acc = ", ".join(f"{aid} ({ACCEPTANCE_MARK[statuses.get((q.rid, aid), 'unreviewed')]})"
-                                for aid in linked) or "нет"
-                miss = (self.items(c.missing_scenarios, 140) or "нет") if c else "не проверено"
-                out.append(f"| {self.cell(q.doc_id)} | {acc} | {miss} |")
+                           f"{self.cell(c.expected)} | {self.cell(c.stated)} |")
+        coverage = {c.req_id: c for c in r.coverage}
+        statuses = {(c.req_id, c.acceptance_id): c.status for c in checks}
+        rows = []
+        for q in (q for q in r.requirements if q.kind == "functional"):
+            c = coverage.get(q.rid)
+            linked = list(dict.fromkeys([*(c.acceptance_ids if c else []),
+                                         *(aid for rid, aid in statuses if rid == q.rid)]))
+            if not c and not linked:
+                continue  # описания архитектуры и схем: сценариев приёмки у них нет
+            acc = ", ".join(f"{self.cell(r.req(aid).doc_id) if r.req(aid) else aid}" for aid in linked) or "нет"
+            miss = (self.items(c.missing_scenarios) or "нет") if c else "не проверено"
+            rows.append(f"| {self.cell(q.doc_id)} | {acc} | {miss} |")
+        out += ["", "### Покрытие функциональных требований критериями приёмки", ""]
+        out += (["| Требование | Проверяется критериями | Не покрыто |", "| :--- | :--- | :--- |", *rows] if rows
+                else ["Функциональных требований с критериями приёмки в документе нет."])
         kept_set = [f for f in r.kept() if f.scope == "set"]
-        if kept_set:
-            out += ["", "### Нарушения уровня набора"]
-            order = [c.code for c in self.P.set] + [c.code for c in self.P.requirement]
-            rank = {"critical": 0, "major": 1, "minor": 2}
-            kept_set.sort(key=lambda f: (rank[f.severity], order.index(f.criterion) if f.criterion in order else 99))
-            for f in kept_set:
-                out += ["", self._finding(f)]
+        out += ["", "### Нарушения уровня набора", ""]
+        out += self._table(kept_set) if kept_set else ["Нарушений уровня набора не найдено."]
         return "\n".join(out)
 
     def per_requirement(self) -> str:
         r = self.res
-        head = "| ТР | В документе | " + " | ".join(c.column for c in self.P.requirement) + " |"
-        sep = "| :--- | :--- |" + " :---: |" * len(self.P.requirement)
-        rows = []
+        crits = self.P.requirement
+        marks = {q.rid: [MARK.get(r.req_verdicts.get(q.rid, {}).get(c.code, ("unreviewed", ""))[0], "?") for c in crits]
+                 for q in r.requirements}
+        out = ["## 6. Проверка каждого требования", "",
+               f"Каждое из {len(r.requirements)} требований проверено по {len(crits)} критериям.", "",
+               "| ТР | В документе | " + " | ".join(c.column for c in crits) + " | Индекс |",
+               "| :--- | :--- |" + " :---: |" * len(crits) + " ---: |"]
+        verdicts = self._marks()
         for q in r.requirements:
-            v = r.req_verdicts.get(q.rid, {})
-            rows.append(f"| {q.rid} | {self.cell(q.doc_id, 28)} | "
-                        + " | ".join(MARK.get(v.get(c.code, ("unreviewed", ""))[0], "?") for c in self.P.requirement) + " |")
-        legend = ("× нарушение, н/п не применимо, ? не проверено, пусто: соответствует. "
-                  + "; ".join(f"{c.column}: {c.name}" for c in self.P.requirement) + ".")
-        out = ["## Проверка каждого требования", "", head, sep, *rows, "", legend]
+            ix = self._index(verdicts[q.rid])
+            out.append(f"| {q.rid} | {self.cell(q.doc_id)} | " + " | ".join(marks[q.rid])
+                       + f" | {'' if ix is None else str(ix) + '%'} |")
+        out += ["", "× нарушение, ? не проверено, н/п не применимо, пусто: соответствует. Индекс: доля пройденных "
+                "применимых критериев. "
+                + "; ".join(f"{c.column}: {c.name}" for c in crits) + "."]
         kept = [f for f in r.kept() if f.scope == "requirement"]
-        for q in r.requirements:
-            own = [f for f in kept if q.rid in f.req_ids and f.req_ids[0] == q.rid]
-            if not own:
-                continue
-            out += ["", f'<a id="{q.rid.lower()}"></a>', f"### {q.rid} / {self.cell(q.doc_id)}: {self.cell(q.summary)}"]
-            for f in own:
-                out += ["", self._finding(f, show_reqs=len(f.req_ids) > 1)]
-        return "\n".join(out)
-
-    def checklist(self) -> str:
-        r = self.res
-        if not r.checklist:
-            return ""
-        icon = {"да": "Да", "нет": "**Нет**", "не требуется": "Не требуется"}
-        yes = sum(1 for c in r.checklist if c.answer.strip().lower() == "да")
-        out = ["## Чек-лист ревью требований", "",
-               f"В документе есть чек-лист ревью банка без отметок. Агент заполнил его по результатам проверки: "
-               f"выполнено {yes} из {len(r.checklist)}.", "",
-               "| Пункт | Ответ | Обоснование |", "| :--- | :--- | :--- |"]
-        for c in r.checklist:
-            ids = ", ".join(self.fid_link(x) for x in c.finding_ids if x in self.by_id)
-            out.append(f"| {self.cell(c.item, model=False)} | {icon.get(c.answer.strip().lower(), self.cell(c.answer))} | "
-                       f"{self.cell(c.rationale, 220)}" + (f" ({ids})" if ids else "") + " |")
+        out += ["", "### Нарушения по требованиям", ""]
+        out += self._table(kept) if kept else ["Нарушений в отдельных требованиях не найдено."]
         return "\n".join(out)
 
     def segmentation(self) -> str:
         r = self.res
         kinds = Counter(KIND.get(x.kind, x.kind) for x in r.requirements)
         lines = [
-            "## Как агент нарезал требования",
+            "## Приложение А. Как агент нарезал требования",
             "",
-            f"Выделено требований: **{len(r.requirements)}** (" + ", ".join(f"{k} {v}" for k, v in kinds.most_common()) + "). "
-            "Где в документе нет номера, агент присвоил локатор по разделу и сохранил цитату.",
+            f"Выделено требований: {len(r.requirements)} (" + ", ".join(f"{k} {v}" for k, v in kinds.most_common()) + "). "
+            "Где у пункта нет номера в документе, агент присвоил локатор по разделу. Цитата взята из документа дословно.",
             "",
-            "| ID в отчёте | ID в документе | Краткая формулировка | Цитата |",
-            "| :--- | :--- | :--- | :--- |",
+            "| ID в отчёте | ID в документе | Краткая формулировка | Цитата из документа | Строка |",
+            "| :--- | :--- | :--- | :--- | :--- |",
         ]
         for q in r.requirements:
+            where = (f"с. {q.anchor.page}, " if q.anchor.page else "") + str(q.anchor.line)
+            if q.anchor.line_end != q.anchor.line:
+                where += f" и далее до {q.anchor.line_end}"
             lines.append(f"| {q.rid} | {self.cell(q.doc_id)} | {self.cell(q.summary)} | "
-                         f"«{self.cell(q.quote, 110, model=False)}» ({_where(q.anchor)}) |")
+                         f"«{self.cell(_plain(q.quote), model=False)}» | {where} |")
         if r.skipped:
-            lines += ["", "Не отнесено к требованиям: " + "; ".join(f"{self.cell(s)} ({self.cell(why)})" for s, why in r.skipped) + "."]
-        if r.lost_requirements:
-            lines += ["", "Отброшено при нарезке (цитаты нет в документе): "
-                      + "; ".join(self.cell(x, 120) for x in r.lost_requirements) + "."]
+            lines += ["", "Не отнесено к требованиям: " + "; ".join(f"{self.cell(s)} ({self.cell(why).rstrip('.')})"
+                                                                  for s, why in r.skipped) + "."]
         return "\n".join(lines)
 
-    def appendix(self) -> str:
+    def fixed_doc(self) -> str:
         r = self.res
-        u = r.usage
-        red = r.redactor.stats() if r.redactor else {}
-        if not r.config.redact:
-            red_txt = "отключено"
-        elif red:
-            red_txt = "заменено до отправки в модель: " + ", ".join(f"{k} {v}" for k, v in red.items())
-        else:
-            red_txt = "включено, чувствительных данных не найдено"
-        out = [
-            "## Приложение: как работает проверка",
-            "",
-            "1. Документ приведён к тексту с номерами строк; карты, ИИН, IBAN, телефоны, e-mail, токены и ФИО "
-            f"заменяются плейсхолдерами до отправки в модель ({red_txt}).",
-            "2. Требования выделены (размеченные пункты кодом, остальные моделью), каждая цитата найдена в документе.",
-            "3. Правила в коде проверили размытые слова, пустые поля шаблона, версию, приоритеты, единицы, методы HTTP и коды ответа.",
-            f"4. Модель проверила каждое требование по {len(self.P.requirement)} критериям и набор по {len(self.P.set)} "
-            "критериям двумя проходами (противоречия; полнота и прочее). Даты в примерах приёмки сверил код.",
-            "5. Находки без цитаты отброшены, остальные проверил независимый проход модели; одинаковые находки объединены.",
-            "6. Решение о готовности принимает правило в коде: критичный дефект блокирует затронутую работу.",
-        ]
-        if u:
-            pc = getattr(u, "prompt_cached_tokens", 0)
-            out.append(f"\nЗапросов к модели: {u.calls}; токенов: вход {u.prompt_tokens}"
-                       + (f" (из кэша провайдера {pc})" if pc else "") + f", выход {u.output_tokens}"
-                       + (f", рассуждение {u.thinking_tokens}" if u.thinking_tokens else "")
-                       + (f"; шагов из локального кэша: {u.cached}" if getattr(u, "cached", 0) else "")
-                       + (f". Журнал запросов: `{_rel(r.audit_dir)}`." if r.audit_dir else "."))
-        out += ["", "**Шкала серьёзности.**", "", *[f"* {ln}" for ln in SEVERITY_RULES.replace("\\\n", "").split("\n")]]
-        rejected = [f for f in r.findings if not f.kept]
-        dups = [f for f in r.findings if f.kept and f.duplicate_of]
-        if rejected:
-            out += ["", "### Отклонено верификатором", "", "| ID | Находка | Почему отклонена |", "| :--- | :--- | :--- |"]
-            for f in rejected:
-                out.append(f"| <a id=\"{f.fid.lower()}\"></a>{f.fid} | {self.cell(_first_sentence(f.problem), 160)} | "
-                           f"{self.cell(f.verifier_note, 160)} |")
-        if dups:
-            out += ["", "### Объединённые дубли", "",
-                    ", ".join(f'<a id="{f.fid.lower()}"></a>{f.fid} в {self.fid_link(f.duplicate_of)}' for f in dups) + "."]
-        if r.fixed:
-            out += ["", "### Исправленная редакция документа", "",
-                    "Файл `*_fixed.md` рядом с отчётом. Где нужен выбор заказчика, стоит пометка [УТОЧНИТЬ: …].", "",
-                    "| Что изменено | Находки |", "| :--- | :--- |"]
-            for c in r.fixed.changes:
-                ids = ", ".join(self.fid_link(x) for x in c.finding_ids if x in self.by_id)
-                out.append(f"| {self.cell(c.change, 240)} | {ids} |")
-            if r.fixed.open_points:
-                out += ["", "Осталось решить заказчику: " + "; ".join(self.t(x) for x in r.fixed.open_points)]
+        if not r.fixed:
+            return ""
+        out = ["## Приложение Б. Исправленная редакция документа", "",
+               "Файл `*_fixed.md` лежит рядом с отчётом. Где нужен выбор заказчика, стоит пометка [УТОЧНИТЬ: …].", "",
+               "| Что изменено | Нарушения |", "| :--- | :--- |"]
+        for c in r.fixed.changes:
+            out.append(f"| {self.cell(c.change)} | {', '.join(x for x in c.finding_ids if x in self.by_id)} |")
+        if r.fixed.open_points:
+            out += ["", "Осталось решить заказчику: " + "; ".join(self.t(x) for x in r.fixed.open_points)]
         return "\n".join(out)
+
+
+MASK_RU = {"КАРТА": "номера карт", "EMAIL": "адреса электронной почты", "IBAN": "счета IBAN", "ИИН": "ИИН",
+           "БИН": "БИН", "ФИО": "ФИО", "ТЕЛЕФОН": "телефоны", "СЕКРЕТ": "токены и ключи",
+           "URL": "внутренние адреса (URL)", "IP": "IP-адреса"}
+TZ_RU = {"Asia/Almaty": "Алматы", "Asia/Qostanay": "Костанай", "Asia/Aqtobe": "Актобе", "Asia/Aqtau": "Актау",
+         "Asia/Oral": "Уральск", "Asia/Atyrau": "Атырау", "Asia/Qyzylorda": "Кызылорда", "Asia/Tashkent": "Ташкент",
+         "Asia/Bishkek": "Бишкек", "Europe/Moscow": "Москва", "Asia/Dubai": "Дубай", "UTC": "UTC"}
+
+
+def _tz_ru(when, key: str) -> str:
+    """Часовой пояс по-русски: «время Алматы, UTC+5» вместо «Asia/Almaty»."""
+    off = when.utcoffset()
+    sign = "+" if not off or off.total_seconds() >= 0 else "-"
+    mins = abs(int(off.total_seconds() // 60)) if off else 0
+    utc = "UTC" + (f"{sign}{mins // 60}" + (f":{mins % 60:02d}" if mins % 60 else "") if mins else "")
+    city = TZ_RU.get(key)
+    return f"время {city}, {utc}" if city and city != "UTC" else (utc if city else f"{key}, {utc}")
+
+
+def _version_ru(v: str) -> str:
+    """«0.1.0 (git c3475ac-dirty)» становится «0.1.0 (git c3475ac, с незафиксированными изменениями)»."""
+    return re.sub(r"(git [0-9a-f]{6,40})-dirty", lambda m: m.group(1) + ", с незафиксированными изменениями", v or "")
+
+
+def _chart(title: str, head: str, rows: list[tuple[str, int]]) -> list[str]:
+    """График как таблица с текстовой полосой: в Markdown читается как есть, в PDF рисуется столбчатая диаграмма."""
+    rows = [(k, v) for k, v in rows if v]
+    if not rows:
+        return []
+    top = max(v for _, v in rows)
+    out = [f"<!-- chart: {title} -->", "", f"*{title}*", "", f"| {head} | Количество | |", "| :--- | ---: | :--- |"]
+    out += [f"| {k} | {v} | {'█' * max(1, round(20 * v / top))} |" for k, v in rows]
+    return out + ["", "<!-- /chart -->", ""]
+
+
+def _plain(s: str) -> str:
+    """Цитата без разметки, которую добавило чтение документа: жирный (**), ячейки таблиц (|).
+    Слова и числа документа не меняются."""
+    s = re.sub(r"\*\*|__", "", s or "")
+    cells = [c.strip() for c in s.strip().strip("|").split("|")]
+    return " / ".join(c for c in cells if c) if len(cells) > 1 else s.strip()
 
 
 def _where(a: Anchor) -> str:
@@ -435,13 +557,15 @@ def _rel(p: Path) -> str:
         return str(p)
 
 
-def write_extras(res: RunResult, report_path: str | Path) -> dict[str, Path]:
-    """Файлы рядом с отчётом: вопросы с полями для ответов и исправленная редакция."""
+def write_extras(res: RunResult, report_path: str | Path, questions: bool = False) -> dict[str, Path]:
+    """Файлы рядом с отчётом, только по запросу: форма вопросов с полями для ответов (questions=True,
+    для повторной проверки с --answers) и исправленная редакция (если проверка шла с --fix).
+    Сами вопросы всегда есть в отчёте, отдельный файл для них не обязателен."""
     from .clarify import write_questions
 
     rp = Path(report_path)
     out: dict[str, Path] = {}
-    if res.questions:
+    if questions and res.questions:
         out["Вопросы заказчику (впишите ответы)"] = write_questions(res, rp.with_name(rp.stem + "_questions.md"))
     if res.fixed:
         restore = res.redactor.restore if res.redactor else (lambda x: x)
@@ -459,7 +583,6 @@ def write_diagnostic(input_path: str | Path, err: Exception, out_path: str | Pat
 
     src = Path(input_path)
     p = Path(out_path)
-    p.parent.mkdir(parents=True, exist_ok=True)
     problem = getattr(err, "problem", str(err))
     advice = getattr(err, "advice", "")
     try:
@@ -500,12 +623,35 @@ def write_diagnostic(input_path: str | Path, err: Exception, out_path: str | Pat
         "разбирать было нечего, поэтому данные документа никуда не передавались.",
         "",
     ]
-    p.write_text("\n".join(lines), encoding="utf-8")
+    return _save("\n".join(lines), p, src.name)
+
+
+FORMATS = ("pdf", "md")
+
+
+def report_paths(out: str | Path, fmt: str | None) -> list[Path]:
+    """Пути отчёта по формату: pdf, md или both. Без формата он берётся из расширения (по умолчанию PDF)."""
+    p = Path(out)
+    ext = p.suffix.lower().lstrip(".")
+    if fmt is None:
+        fmt = ext if ext in FORMATS else "pdf"
+    base = p.with_suffix("") if ext in FORMATS else p
+    if fmt == "both":
+        return [base.with_suffix(".pdf"), base.with_suffix(".md")]
+    return [base.with_suffix("." + fmt)]
+
+
+def _save(text: str, p: Path, doc_title: str = "") -> Path:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if p.suffix.lower() == ".pdf":
+        from . import __version__
+        from .pdf import footer_text, markdown_to_pdf
+
+        return markdown_to_pdf(text, p, "Отчёт о проверке требований", doc_title, footer_text(__version__))
+    p.write_text(text, encoding="utf-8")
     return p
 
 
 def write(res: RunResult, out_path: str | Path) -> Path:
-    p = Path(out_path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(Renderer(res).render(), encoding="utf-8")
-    return p
+    """Отчёт в файл: .pdf свёрстан как документ, любое другое расширение получает Markdown."""
+    return _save(Renderer(res).render(), Path(out_path), res.doc.title)

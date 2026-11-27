@@ -53,7 +53,7 @@ def test_pdf_month_boundary_has_two_sources(tmp_path):
     assert res.questions[0].finding_ids == [finding.fid]
     assert res.decision_dev.startswith("НЕЛЬЗЯ")
     text = report.Renderer(res).render()
-    assert "Сверка примеров приёмки" in text and "противоречие" in text and "? не проверено" in text
+    assert "Сверка критериев приёмки" in text and "противоречие" in text and "? не проверено" in text
     assert res.phase_seconds.keys() >= {"segment", "review", "verify_and_dedupe", "final"}
     res.findings.clear()
     pipeline._decide(res)

@@ -146,10 +146,22 @@ def test_end_to_end(tmp_path, monkeypatch):
     out = report.write(res, tmp_path / "report.md")
     text = out.read_text(encoding="utf-8")
     # разделы ТЗ: паспорт, нарезка, проверка каждого требования и набора, сводка, итог
-    for section in ["## Паспорт прогона", "## Как агент нарезал требования", "## Проверка каждого требования",
-                    "## Проверка всего набора требований", "## Вопросы для уточнения", "## Чек-лист ревью требований",
-                    "## Сводка", "## Итог", "> **Разработка:**", "Покрытие функциональных требований"]:
+    for section in ["## 1. Паспорт прогона", "## Приложение А. Как агент нарезал требования",
+                    "## 6. Проверка каждого требования", "## 5. Проверка всего набора требований",
+                    "## 4. Вопросы к заказчику", "## 3. Сводка", "## 2. Итог", "> **Разработка:**",
+                    "Покрытие функциональных требований", "oresa"]:
         assert section in text, section
+    # PDF из того же отчёта: A4, текст с кириллицей, номера страниц в колонтитуле
+    import pymupdf
+
+    pdf = report.write(res, tmp_path / "report.pdf")
+    doc = pymupdf.open(pdf)
+    first = doc[0].get_text()
+    assert "Отчёт о проверке требований" in first and f"Страница 1 из {doc.page_count}" in first
+    assert doc.metadata["author"] == "oresa"
+    assert [p.suffix for p in report.report_paths(tmp_path / "x", "both")] == [".pdf", ".md"]
+    assert report.report_paths(tmp_path / "x.md", None)[0].suffix == ".md"
+    assert report.report_paths(tmp_path / "x", None)[0].suffix == ".pdf"
     assert "| нет |" in text  # Ф-1 без критериев приёмки
     assert "строка" in text and "ТР-02" in text
     # состояние сохраняется, и отчёт перерисовывается без модели
@@ -170,7 +182,7 @@ def test_final_step_failure_still_writes_report(tmp_path):
     res = pipeline.run(str(SAMPLE), cfg, log=lambda *_: None, client_factory=lambda red, audit: Failing(red))
     assert res.warnings and res.conclusion and res.conclusion.fix_first
     text = report.write(res, tmp_path / "r.md").read_text(encoding="utf-8")
-    assert "Предупреждение" in text and "## Итог" in text
+    assert "Предупреждение" in text and "## 2. Итог" in text
 
 
 def test_answers_loop_and_fixed_document(tmp_path, monkeypatch):
@@ -179,7 +191,7 @@ def test_answers_loop_and_fixed_document(tmp_path, monkeypatch):
     cfg = Config.load(runs_dir=str(tmp_path / "runs"), redact_ner=False)
     first = pipeline.run(str(SAMPLE), cfg, log=lambda *_: None, client_factory=lambda red, audit: FakeClient(red))
     rp = report.write(first, tmp_path / "report.md")
-    qfile = report.write_extras(first, rp)["Вопросы заказчику (впишите ответы)"]
+    qfile = report.write_extras(first, rp, questions=True)["Вопросы заказчику (впишите ответы)"]
     text = qfile.read_text(encoding="utf-8")
     assert "## В-1. Какой месяц?" in text and "Ответ: " in text
     qfile.write_text(text.replace("Ответ: ", "Ответ: 1", 1), encoding="utf-8")

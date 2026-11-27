@@ -39,7 +39,7 @@ def test_status_samples_and_frontend(client):
     st = client.get("/api/status").json()
     assert st["has_env_key"] and "api_key" not in st["defaults"]
     assert {"id": "sample:requirements.md", "name": "requirements.md"} in client.get("/api/samples").json()
-    assert "Агент проверки требований" in client.get("/").text
+    assert "oresa: агент проверки требований" in client.get("/").text
     assert client.get("/static/app.js").status_code == 200
 
 

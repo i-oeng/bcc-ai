@@ -70,3 +70,18 @@ def test_model_suggestions_per_provider(tmp_path, monkeypatch):
     assert "deepseek-chat" in _complete(s, "/model deep")
     shell._model(sh, "2")  # выбор по номеру
     assert sh.cfg.model == "gpt-5" and "OPENAI_MODEL=gpt-5" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_strip_switches_format_and_model():
+    """F2 меняет формат отчёта, F3 модель; строка внизу показывает текущий выбор."""
+    sh = shell.Shell()
+    with create_pipe_input() as inp:
+        read = shell._make_reader(sh, pt_input=inp, pt_output=DummyOutput())
+        first = sh.cfg.model
+        inp.send_text("\x1bOQ\x1bOQ\x1bOR\r")  # F2, F2, F3, Enter
+        read()
+    assert sh.fmt == "both" and sh.strip
+    assert sh.cfg.model != first or len(shell._models_for(sh)) <= 1
+    bar = "".join(t for _, t in read.session.bottom_toolbar().formatted_text if isinstance(t, str)) \
+        if hasattr(read.session.bottom_toolbar(), "formatted_text") else str(read.session.bottom_toolbar().value)
+    assert "PDF и Markdown" in bar and sh.cfg.model in bar

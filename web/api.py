@@ -28,7 +28,7 @@ STATIC = Path(__file__).resolve().parent / "static"
 mimetypes.add_type("font/woff2", ".woff2")  # в реестре Windows его может не быть
 MAX_UPLOAD = 20 * 1024 * 1024
 
-app = FastAPI(title="Агент проверки требований", version=__version__,
+app = FastAPI(title="oresa: агент проверки требований", version=__version__,
               description="Статическая проверка требований по ISO/IEC/IEEE 29148, IEEE 830 и другим стандартам")
 REGISTRY = JobRegistry()
 
@@ -330,8 +330,8 @@ def run_report(run_id: str, format: str = Query("html", pattern="^(html|md)$")):
 
 @app.get("/api/runs/{run_id}/files/{kind}")
 def run_file(run_id: str, kind: str):
-    """kind: report | questions | fixed | result"""
-    files = services.run_files(_run(run_id))
+    """kind: report_pdf | report | questions | fixed | result"""
+    files = services.run_files(_run(run_id), pdf=kind == "report_pdf")
     if kind not in files:
         raise HTTPException(404, "Такого файла у проверки нет")
     return FileResponse(files[kind], filename=files[kind].name)

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
@@ -24,7 +25,7 @@ from pathlib import Path
 
 from rapidfuzz import fuzz
 
-from . import __version__, prompts, rules, structured
+from . import __version__, prompts, rules, strict, structured
 from .config import Config
 from .criteria import DEFAULT, SEVERITIES, Profile, profile as make_profile
 from .grounding import Anchor, Grounder
@@ -85,6 +86,7 @@ class RunResult:
     acceptance_checks: list[AcceptanceCheck] = field(default_factory=list)
     phase_seconds: dict[str, float] = field(default_factory=dict)
     local_requirements: int = 0
+    grounding: dict = field(default_factory=dict)  # что убрано проверкой опоры (strict.py)
 
     @property
     def prof(self) -> Profile:
@@ -232,7 +234,7 @@ def _run(
     local_lines = {r.anchor.line for r in local}
     seg = client.generate("segment", SYSTEM, segment_prompt, Segmentation)
     for r in seg.requirements:
-        a = grounder.find(r.quote, min_score=85)
+        a = grounder.find(r.quote, min_score=85) or _status_anchor(grounder, masked, r.doc_id)
         if not a:
             res.lost_requirements.append(f"{r.doc_id}: {r.quote}")
             continue
@@ -437,6 +439,10 @@ def _run(
         else:
             res.warnings.append(f"Исправленная редакция не сформирована: {fx}")
             log(f"  исправленная редакция пропущена: {fx}")
+    st = strict.enforce(res)  # всё, что модель написала о документе, сверено с документом
+    dropped = sum(st[k] for k in ("ids", "lines", "questions", "quotes", "fix_first"))
+    if dropped:
+        log(f"  убрано без опоры на документ: {dropped} (ссылки, строки, вопросы, цитаты, пункты итога)")
     _done(log, t, f"{len(res.questions)} вопросов"
           + (f"; изменений в редакции: {len(res.fixed.changes)}" if res.fixed else ""))
     res.phase_seconds["final"] = round(time.perf_counter() - t, 3)
@@ -471,7 +477,9 @@ def load_state(run_dir: str | Path) -> RunResult:
     import pickle
 
     with open(Path(run_dir) / "state.pkl", "rb") as fh:
-        return pickle.load(fh)
+        res = pickle.load(fh)
+    strict.enforce(res)  # сохранённые до появления проверки опоры проверки чистятся так же
+    return res
 
 
 def save_json(res: RunResult, path: Path) -> None:
@@ -739,6 +747,24 @@ def _norm_rid(x: str) -> str:
 
     m = re.search(r"(\d+)", x or "")
     return f"ТР-{int(m.group(1)):02d}" if m else (x or "").strip()
+
+
+def _status_anchor(grounder: Grounder, text: str, doc_id: str):
+    """Опора для кода ответа API, если модель процитировала не строку статуса (например одну скобку «{»).
+
+    Берётся первая строка документа, которая начинается с этого кода: «**400.** Ответ в случае…»,
+    «#### **404**», «| 500 | …».
+    """
+    m = re.search(r"(?<!\d)([1-5]\d\d)(?!\d)", doc_id or "")
+    if not m or not re.search(r"статус|код|status|http", doc_id, re.I):
+        return None
+    head = re.compile(rf"^[\s#*|>_]*{m.group(1)}(?!\d)")
+    for i, line in enumerate(text.split("\n"), 1):
+        if head.match(line) and len(re.sub(r"[\W_]", "", line)) >= 3:
+            a = grounder.line_anchor(i)
+            a.text = re.sub(r"\*\*|__", "", a.text).strip()
+            return a
+    return None
 
 
 def _dedupe_requirements(res: RunResult) -> None:
