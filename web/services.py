@@ -13,7 +13,6 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-import markdown
 
 from validator import criteria as criteria_mod
 from validator import pipeline, report
@@ -338,6 +337,8 @@ def report_markdown(res) -> str:
 
 def markdown_html(text: str, highlight_placeholders: bool = False) -> str:
     """Markdown в HTML. Показывать только в iframe с sandbox: в документе может быть сырой HTML."""
+    import markdown  # только для страницы отчёта в веб-интерфейсе: терминалу пакет не нужен
+
     html = markdown.markdown(text, extensions=["tables", "fenced_code", "md_in_html", "sane_lists"])
     if highlight_placeholders:
         html = _PLACEHOLDER.sub(lambda m: f'<mark class="ph">{m.group(0)}</mark>', html)

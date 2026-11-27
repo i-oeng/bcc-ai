@@ -201,6 +201,35 @@ def in_background(fn, title: str):
     return box.get("value")
 
 
+PKG = {"google": "google-genai", "fitz": "pymupdf", "docx": "python-docx", "dotenv": "python-dotenv",
+       "multipart": "python-multipart", "yaml": "pyyaml"}
+
+
+def human_error(e: BaseException) -> tuple[str, str]:
+    """Ошибка по-русски и что сделать: без английских сообщений библиотек и трассировок."""
+    if isinstance(e, ModuleNotFoundError):
+        mod = (e.name or str(e)).split(".")[0]
+        return (f"Не установлен пакет {PKG.get(mod, mod)}.",
+                "Запустите агента из окружения проекта: .venv\\Scripts\\activate (Windows) или source .venv/bin/activate, "
+                "затем pip install -r requirements.txt.")
+    if isinstance(e, PermissionError):
+        return (f"Нет доступа к файлу: {e.filename or e}.", "Закройте файл в других программах или выберите другую папку.")
+    if isinstance(e, FileNotFoundError):
+        return (f"Файл не найден: {e.filename or e}.", "Проверьте путь.")
+    if isinstance(e, (ConnectionError, TimeoutError)):
+        return ("Нет связи с сервисом модели.", "Проверьте интернет или прокси и повторите; готовые шаги сохранены в кэше.")
+    if isinstance(e, MemoryError):
+        return ("Не хватило памяти.", "Закройте другие программы или проверьте документ меньшего размера.")
+    if type(e).__name__ in ("LLMError", "RedactionLeak", "DocumentError", "StandardError", "EditError", "NotFound"):
+        return (str(e), "")  # сообщения агента уже на русском
+    if isinstance(e, ValueError) and re.search(r"[А-Яа-яЁё]", str(e)):
+        return (str(e), "")
+    if isinstance(e, (IndexError, KeyError)):
+        return ("Нет такого элемента.", "Проверьте номер или ID: /history, /findings, /questions.")
+    return (f"Внутренняя ошибка ({type(e).__name__}).",
+            "Повторите действие; если ошибка повторяется, запустите python main.py --help или проверку из командной строки.")
+
+
 def _where(a) -> str:
     return a.where().split(", раздел")[0]
 
@@ -281,7 +310,10 @@ class Shell:
                 say("Прервано.", style=amber)
             except Exception as e:  # noqa: BLE001
                 Spinner.clear()
-                hang(red("● "), f"Ошибка: {e}", style=red)
+                msg, todo = human_error(e)
+                hang(red("● "), f"Ошибка: {msg}", style=red)
+                if todo:
+                    hang("  ", todo, style=grey)
             print()
 
     def dispatch(self, line: str):
