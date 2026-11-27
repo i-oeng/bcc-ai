@@ -412,10 +412,9 @@ def _run(
     outs = _parallel(tasks, cfg.parallel, stop, tolerate=True)
     fin = outs.get("final")
     if isinstance(fin, Final):
-        order = {"blocking": 0, "important": 1, "nice": 2}
-        covered = {fid for q in res.questions for fid in q.finding_ids}
-        res.questions.extend(q for q in fin.questions if not q.finding_ids or not covered.issuperset(q.finding_ids))
-        res.questions.sort(key=lambda q: order.get(q.priority, 3))
+        code_questions = list(res.questions)
+        res.questions.extend(fin.questions)
+        _dedupe_questions(res, code_questions)
         res.checklist = fin.checklist if res.checklist_items else []
         res.conclusion = Conclusion(
             development_rationale=fin.development_rationale, testing_rationale=fin.testing_rationale,
@@ -645,6 +644,24 @@ def _verify(res, client, system, numbered):
     _fix_duplicate_chains(res)
 
 
+def _dedupe_questions(res, code_questions) -> None:
+    """Один вопрос на один дефект. Ссылки на дубли заменяются основной находкой; если модель спросила
+    о том же дефекте, что и вопрос, собранный кодом из сверки примеров, остаётся формулировка модели."""
+    by_id = {f.fid: f for f in res.findings}
+
+    def root(fid):
+        f = by_id.get(fid)
+        return f.duplicate_of or fid if f else fid
+
+    for q in res.questions:
+        q.finding_ids = list(dict.fromkeys(root(x) for x in q.finding_ids))
+    model_ids = {x for q in res.questions if not any(q is c for c in code_questions) for x in q.finding_ids}
+    res.questions = [q for q in res.questions
+                     if not (any(q is c for c in code_questions) and set(q.finding_ids) & model_ids)]
+    order = {"blocking": 0, "important": 1, "nice": 2}
+    res.questions.sort(key=lambda q: order.get(q.priority, 3))
+
+
 def _add_acceptance_questions(res, conflicts):
     from .schemas import Question
 
@@ -661,7 +678,8 @@ def _add_acceptance_questions(res, conflicts):
                                       addressee="Бизнес-заказчик", req_ids=candidate.req_ids,
                                       finding_ids=[fid], quote=candidate.anchors[-1].text,
                                       question=check.question, why=candidate.problem,
-                                      options=[check.expected, check.stated]))
+                                      options=[f"как в правиле: {check.expected.rstrip('. ')}",
+                                               f"как в примере: {check.stated.rstrip('. ')}"]))
 
 
 def _numbered(text: str) -> str:

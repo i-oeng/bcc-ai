@@ -1,5 +1,6 @@
 """Командная строка.
 
+    python main.py --input ВХОДНОЙ_ФАЙЛ --output ФАЙЛ_ОТЧЁТА
     python -m validator ВХОДНОЙ_ФАЙЛ [ФАЙЛ_ОТЧЁТА]
 """
 
@@ -20,13 +21,14 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     ap = argparse.ArgumentParser(
-        prog="python -m validator",
+        prog="python main.py",
         description="ИИ-агент статической проверки требований (ISO/IEC/IEEE 29148, IEEE 830 и другие стандарты). "
         "Читает документ (PDF, DOCX, MD, TXT, HTML) и пишет отчёт на русском в Markdown.",
     )
     ap.add_argument("input", nargs="?", help="путь к документу с требованиями")
     ap.add_argument("output", nargs="?", help="путь к файлу отчёта (по умолчанию reports/<имя>_report.md)")
-    ap.add_argument("-o", "--out", dest="out_opt", help="то же, что второй аргумент")
+    ap.add_argument("-i", "--input", dest="input_opt", metavar="ФАЙЛ", help="то же, что первый аргумент")
+    ap.add_argument("-o", "--output", "--out", dest="out_opt", metavar="ФАЙЛ", help="то же, что второй аргумент")
     ap.add_argument("--provider", choices=["gemini", "openai", "anthropic"],
                     help="провайдер модели (по умолчанию LLM_PROVIDER из .env, иначе gemini)")
     ap.add_argument("--model", help="модель (по умолчанию <ПРОВАЙДЕР>_MODEL из .env)")
@@ -50,6 +52,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="перерисовать отчёт из сохранённой проверки runs/<...> без запросов к модели")
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     args = ap.parse_args(argv)
+    if args.input_opt:
+        if args.input and not args.output:  # main.py --input A B: второй позиционный это отчёт
+            args.output = args.input
+        args.input = args.input_opt
 
     from .config import Config
     from .criteria import StandardError, available, profile
@@ -100,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not args.input:
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            from .shell import run as interactive
+
+            return interactive()  # python main.py без аргументов: интерактивный режим
         ap.print_help()
         return 2
 

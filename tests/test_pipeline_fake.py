@@ -145,9 +145,10 @@ def test_end_to_end(tmp_path, monkeypatch):
     assert kept_ids == [f"Н-{i:02d}" for i in range(1, len(kept_ids) + 1)]
     out = report.write(res, tmp_path / "report.md")
     text = out.read_text(encoding="utf-8")
-    for section in ["## 1. Паспорт проверки", "## 2. Как агент нарезал требования", "## 3. Проверка каждого требования",
-                    "## 4. Проверка всего набора требований", "## 5. Вопросы для уточнения", "## 6. Чек-лист ревью требований",
-                    "## 7. Сводка", "## 8. Итог", "## Кратко", "Покрытие функциональных требований"]:
+    # разделы ТЗ: паспорт, нарезка, проверка каждого требования и набора, сводка, итог
+    for section in ["## Паспорт прогона", "## Как агент нарезал требования", "## Проверка каждого требования",
+                    "## Проверка всего набора требований", "## Вопросы для уточнения", "## Чек-лист ревью требований",
+                    "## Сводка", "## Итог", "> **Разработка:**", "Покрытие функциональных требований"]:
         assert section in text, section
     assert "| нет |" in text  # Ф-1 без критериев приёмки
     assert "строка" in text and "ТР-02" in text
@@ -169,7 +170,7 @@ def test_final_step_failure_still_writes_report(tmp_path):
     res = pipeline.run(str(SAMPLE), cfg, log=lambda *_: None, client_factory=lambda red, audit: Failing(red))
     assert res.warnings and res.conclusion and res.conclusion.fix_first
     text = report.write(res, tmp_path / "r.md").read_text(encoding="utf-8")
-    assert "Предупреждение" in text and "## 8. Итог" in text
+    assert "Предупреждение" in text and "## Итог" in text
 
 
 def test_answers_loop_and_fixed_document(tmp_path, monkeypatch):
@@ -191,7 +192,7 @@ def test_answers_loop_and_fixed_document(tmp_path, monkeypatch):
     out = report.write(second, tmp_path / "report2.md")
     extras = report.write_extras(second, out)
     body = out.read_text(encoding="utf-8")
-    assert "Закрыто ответом заказчика" in body and "Учтённые ответы заказчика" in body and "Приложение D" in body
+    assert "Закрыто ответом заказчика" in body and "Учтённые ответы заказчика" in body and "Исправленная редакция документа" in body
     assert extras["Исправленная редакция документа"].read_text(encoding="utf-8").startswith("# Исправлено")
 
 
