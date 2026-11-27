@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -51,6 +52,8 @@ class Document:
     lines: list[str] = field(default_factory=list)
     line_pages: list[int | None] = field(default_factory=list)
     line_sections: list[str] = field(default_factory=list)
+    images: int = 0  # картинки без текстового слоя (сканы, скриншоты, схемы): их содержимое агент не читает
+    image_pages: list[int] = field(default_factory=list)
 
     def numbered(self) -> str:
         """Текст с номерами строк: так модель может ссылаться на место."""
@@ -109,7 +112,35 @@ def load(path: str | Path) -> Document:
         doc.line_pages = [None] * len(doc.lines)
     doc.line_sections = _sections(doc.lines)
     doc.title = _title(doc.lines, p)
+    doc.images, doc.image_pages = _count_images(p, ext)
     return doc
+
+
+def _count_images(p: Path, ext: str) -> tuple[int, list[int]]:
+    """Сколько в документе заметных растровых картинок (логотипы и значки меньше 100x60 не считаются)."""
+    try:
+        if ext == ".pdf":
+            import pymupdf
+
+            pages: list[int] = []
+            n = 0
+            with pymupdf.open(str(p)) as d:
+                for i, page in enumerate(d, 1):
+                    k = sum(1 for im in page.get_images(full=True) if im[2] >= 100 and im[3] >= 60)
+                    if k:
+                        n += k
+                        pages.append(i)
+            return n, pages
+        if ext == ".docx":
+            import zipfile
+
+            with zipfile.ZipFile(p) as z:
+                media = [x for x in z.namelist() if x.startswith("word/media/")
+                         and z.getinfo(x).file_size > 4000]
+            return len(media), []
+    except Exception:  # noqa: BLE001
+        pass
+    return 0, []
 
 
 def _decode_text(raw: bytes) -> str:
@@ -210,7 +241,17 @@ def _decode(raw: bytes) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+# «Математические» буквы и цифры из формул (𝑣1, 𝑅, 𝐼) в обычные: так их читает модель и находит поиск цитат.
+# Верхние и нижние индексы (м², H₂O) не трогаем: NFKC превратил бы 10² в 102.
+_MATH_ALNUM = {cp: unicodedata.normalize("NFKC", chr(cp)) for cp in range(0x1D400, 0x1D800)
+               if unicodedata.normalize("NFKC", chr(cp)) != chr(cp)}
+# служебные пометки PyMuPDF4LLM вокруг текста рисунков
+_PICTURE_MARK = re.compile(r"<!--\s*(?:Start|End) of picture text\s*-->")
+
+
 def _clean(text: str) -> str:
+    text = text.translate(_MATH_ALNUM)
+    text = _PICTURE_MARK.sub("", text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace(" ", " ").replace(" ", " ").replace(" ", " ")
     # PDF часто отдаёт дефис как мягкий перенос (U+00AD): «Ф­1» вместо «Ф-1»

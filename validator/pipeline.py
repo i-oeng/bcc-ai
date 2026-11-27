@@ -166,6 +166,12 @@ def _run(
     doc = load(input_path)
     res = RunResult(doc=doc, config=cfg, started=started, agent_version=agent_version(), profile=prof)
     log(f"Документ: {doc.path.name} ({doc.fmt}, {len(doc.lines)} строк), «{doc.title}»")
+    if getattr(doc, "images", 0):
+        where = f" (стр. {', '.join(map(str, doc.image_pages[:12]))}{'…' if len(doc.image_pages) > 12 else ''})" if doc.image_pages else ""
+        note = (f"В документе {doc.images} изображений{where}: текст и схемы на картинках агент не читает, "
+                "их содержимое не проверено. Важные требования с картинок перенесите в текст.")
+        res.warnings.append(note)
+        log(f"  {note}")
     log(f"Стандарты: {prof.titles()}")
     SYSTEM = prompts.system(prof)
 
